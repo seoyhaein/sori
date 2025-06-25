@@ -1,0 +1,27 @@
+{
+  "volumeRoots": [
+    {
+      "name": "local",
+      "type": "local",
+      "paths": [
+        "./test-vol"
+      ]
+    },
+    {
+      "name": "dev-node-1",
+      "type": "remote",
+      "address": "10.0.1.10:50051",
+      "paths": [
+        "/data/volumes"
+      ]
+    },
+    {
+      "name": "test-node-3",
+      "type": "remote",
+      "address": "10.0.1.23:50051",
+      "paths": [
+        "/var/lib/sori/volumes"
+      ]
+    }
+  ]
+}
