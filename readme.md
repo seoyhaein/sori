@@ -13,3 +13,38 @@
 - 2 tarball 생성 시점에 SHA-256 해시를 계산해 기록  
 - 3 OCI push 후 descriptor.Digest 로 같은 값을 기록  
 - 4 클라이언트가 요청 시점에 tarball 또는 레이어 digest 를 재계산/확인 → 메타에 저장된 값과 비교  
+
+### 사용해야 할 것.
+- groupcache
+- 구글에서 만든 분산 메모리 캐시 라이브러리  
+- 여러 대의 애플리케이션 인스턴스가 서로 “내가 가진 캐시를 꺼내 쓸래? 아니면 네가 가져가도 돼?” 식으로 조율  
+- “peer” 노드 간에 자동으로 캐시를 share  
+
+```aiignore
+import "github.com/golang/groupcache"
+
+// 전역 그룹 선언
+var volumeGroup = groupcache.NewGroup(
+  "volumes",
+  64<<20, // 캐시 최대 64MB
+  groupcache.GetterFunc(func(ctx groupcache.Context, key string, dest groupcache.Sink) error {
+    // cache miss 시 호출: 키(key)에 해당하는 VolumeManifest를 DB/파일에서 로드
+    manifest, err := loadManifestFromStore(key)
+    if err != nil {
+      return err
+    }
+    data, _ := proto.Marshal(manifest)
+    dest.SetBytes(data)
+    return nil
+  }))
+
+// 핸들러 내부에서 사용
+var data []byte
+err := volumeGroup.Get(ctx, volumeRef, groupcache.AllocatingByteSliceSink(&data))
+if err != nil {
+  return nil, err
+}
+var m volresv1.VolumeManifest
+proto.Unmarshal(data, &m)
+
+```
