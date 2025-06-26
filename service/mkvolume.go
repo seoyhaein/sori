@@ -3,11 +3,18 @@ package service
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	volresv1 "github.com/seoyhaein/api-protos/gen/go/volres/ichthys"
 	globallog "github.com/seoyhaein/sori/log"
 	"io"
+	"oras.land/oras-go/v2"
+	contentFile "oras.land/oras-go/v2/content/file"
+	"oras.land/oras-go/v2/registry"
+	"oras.land/oras-go/v2/registry/remote"
 	"os"
 	"path/filepath"
 	"sort"
@@ -233,26 +240,56 @@ func PackDirToTarGzWithDigest(srcDir, destTarGz string) (string, error) {
 	return sha256File(destTarGz)
 }
 
-// TODO oras-go 설치 해야함.
+// TODO oras-go 설치 해야함. 버그 그대로 나둠.
 // 예: oras-go로 레이어 push 후 digest 받기
-/*func PushLayerAndGetDigest(ctx context.Context, tarGzPath, targetRef string) (string, error) {
-	// client 설정 생략…
-	ref, err := name.ParseReference(targetRef)
-	// … push 로직 …
-	descs, err := oras.Push(
-		ctx,
-		reference,
-		content,
-		oras.WithPushConfig(oras.DefaultPushConfig),
-	)
+// PushLayerAndGetDigest
+//   - ctx: 호출 컨텍스트
+//   - tarGzPath: 로컬에 생성된 tar.gz 파일 전체 경로
+//   - targetRef: "registry.io/repo/name:tag" 또는 "@sha256:..." 형태
+//
+// 반환값: 성공 시 "sha256:xxxxx…" 형태의 레이어 다이제스트
+func PushLayerAndGetDigest(ctx context.Context, tarGzPath, targetRef string) (string, error) {
+	// 1) 레퍼런스 파싱
+	ref, err := registry.ParseReference(targetRef)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("reference parse failed: %w", err)
 	}
-	// descs 는 pushed descriptor 목록, 가장 하위 레이어가 tarGzPath일 테니
-	for _, desc := range descs {
-		if desc.MediaType == ocispec.MediaTypeImageLayerGzip {
-			return desc.Digest.String(), nil // "sha256:…" 형태
+
+	// 2) 파일 콘텐츠 스토어 준비 (tar.gz가 있는 디렉터리)
+	workDir := filepath.Dir(tarGzPath)
+	store, err := contentFile.New(workDir)
+	if err != nil {
+		return "", fmt.Errorf("file store init failed: %w", err)
+	}
+	defer store.Close()
+
+	// 3) tar.gz 파일을 콘텐츠 스토어에 추가
+	//    mediaType은 gzip 압축된 OCI 레이어 타입
+	layerName := filepath.Base(tarGzPath)
+	desc, err := store.Add(ctx, layerName, ocispec.MediaTypeImageLayerGzip, "")
+	if err != nil {
+		return "", fmt.Errorf("adding file to store failed: %w", err)
+	}
+
+	// 4) 원격 레포(repository) 클라이언트 생성
+	repo, err := remote.NewRepository(ref)
+	if err != nil {
+		return "", fmt.Errorf("repository client init failed: %w", err)
+	}
+
+	// 5) 콘텐츠 복사(push)
+	//    store에 담긴 desc를 repo로 복사(push)합니다.
+	pushed, err := oras.Copy(ctx, store, desc, repo, oras.WithCopyConfig(oras.DefaultCopyConfig()))
+	if err != nil {
+		return "", fmt.Errorf("push failed: %w", err)
+	}
+
+	// 6) 푸시된 descriptors 중 gzip 레이어의 digest를 찾아 반환
+	for _, d := range pushed {
+		if d.MediaType == ocispec.MediaTypeImageLayerGzip {
+			return d.Digest.String(), nil
 		}
 	}
-	return "", fmt.Errorf("layer digest not found")
-}*/
+
+	return "", fmt.Errorf("layer digest not found in pushed descriptors")
+}

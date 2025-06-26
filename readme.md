@@ -52,3 +52,6 @@ proto.Unmarshal(data, &m)
 - 이미지 처리 부분과 맞다아 있음. 같이 고려해야함.  
 - https://github.com/seoyhaein/dockhouse 참고.  
 - tori 와 파일 포멧에 대해서 생각해줘야 함.  
+
+### oras-go
+- https://github.com/oras-project/oras-go/blob/main/docs/tutorial/quickstart.md
