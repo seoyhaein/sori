@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/google/uuid"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	volresv1 "github.com/seoyhaein/api-protos/gen/go/volres/ichthys"
 	globallog "github.com/seoyhaein/sori/log"
@@ -61,30 +62,28 @@ func buildResource(path, rootPath string) (*volresv1.VolumeResource, uint64, uin
 		return nil, 0, 0, err
 	}
 
-	// 상대 경로 계산
+	// rootPath 기준의 상대 경로 계산
 	rel, err := filepath.Rel(rootPath, path)
 	if err != nil {
 		return nil, 0, 0, err
 	}
 
-	id, err := idFromPath(path)
-	if err != nil {
-		return nil, 0, 0, err
-	}
+	// 항상 새 UUID ID로 부여
 	vr := &volresv1.VolumeResource{
-		Id:          id,
+		Id:          uuid.NewString(),
 		Basename:    info.Name(),
 		FullPath:    rel,
 		IsDirectory: info.IsDir(),
 		Size:        uint64(info.Size()),
 		ModTime:     info.ModTime().Unix(),
-		Attrs:       map[string]string{}, // 필요하면 여기에 추가 속성 채우기
+		Attrs:       map[string]string{},
 	}
 
 	var totalSize uint64
 	var recordCount uint64
 
 	if info.IsDir() {
+		// 디렉터리인 경우, 자식 리소스만 순회
 		entries, err := os.ReadDir(path)
 		if err != nil {
 			return nil, 0, 0, err
@@ -99,8 +98,9 @@ func buildResource(path, rootPath string) (*volresv1.VolumeResource, uint64, uin
 			totalSize += cs
 			recordCount += rc
 		}
+		// 디렉터리는 vr.Checksum 비워 둠.
 	} else {
-		// 파일인 경우 체크섬 계산
+		// 파일인 경우에만 체크섬 계산
 		sum, err := sha256File(path)
 		if err != nil {
 			return nil, 0, 0, err
@@ -152,22 +152,22 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// computeVolumeRef는 트리 구조의 루트 리소스(res)를 순회하며
+// computeVolumeRef 는 트리 구조의 루트 리소스(res)를 순회하며
 // 파일별 ID(=SHA256)와 경로를 일관된 순서로 해시해
-// 볼륨 전체의 고유 해시를 반환합니다.
+// 볼륨 전체의 고유 해시를 반환함.
 func computeVolumeRef(res *volresv1.VolumeResource) string {
-	hasher := sha256.New()
+	h := sha256.New()
 	// 재귀적으로 flatten
 	var walk func(r *volresv1.VolumeResource)
 	walk = func(r *volresv1.VolumeResource) {
-		// 파일인 경우 “경로:파일ID” 문자열을 해시
+		// 파일인 경우 “경로:파일 ID” 문자열을 해시
 		if !r.IsDirectory && r.Id != "" {
-			hasher.Write([]byte(r.FullPath))
-			hasher.Write([]byte{0})    // 구분자
-			hasher.Write([]byte(r.Id)) // 파일 콘텐츠 해시
-			hasher.Write([]byte{0})    // 구분자
+			h.Write([]byte(r.FullPath))
+			h.Write([]byte{0})    // 구분자
+			h.Write([]byte(r.Id)) // 파일 콘텐츠 해시
+			h.Write([]byte{0})    // 구분자
 		}
-		// 디렉터리는 Children만 순회하되, 이름순 정렬을 보장
+		// 디렉터리는 Children 만 순회하되, 이름순 정렬을 보장
 		if r.IsDirectory && len(r.Children) > 0 {
 			// 이름순 정렬
 			sort.Slice(r.Children, func(i, j int) bool {
@@ -180,7 +180,7 @@ func computeVolumeRef(res *volresv1.VolumeResource) string {
 	}
 	walk(res)
 
-	return hex.EncodeToString(hasher.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // 1) 폴더를 tar.gz로 묶으면서 동시에 해시 계산 TODO 일단 그냥 넣음. 최적화 해야 함.

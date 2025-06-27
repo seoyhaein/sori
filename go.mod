@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.3
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/seoyhaein/api-protos/gen/go/volres/ichthys v1.0.6
 	github.com/sirupsen/logrus v1.9.3
