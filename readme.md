@@ -55,3 +55,8 @@ proto.Unmarshal(data, &m)
 
 ### oras-go
 - https://github.com/oras-project/oras-go/blob/main/docs/tutorial/quickstart.md
+
+### 생ㄱ각할것들 (중요, 일단 생각나는데로 해서 정리 안됨)
+~~- 레어버 구분해주는 것을 tui 로 구현하는 것으로 생각했음. 이 내용을 바탕으로 json 만들어주는 방향으로.~~   
+~~- 하위 디렉토리 내용을 선택해서 레이어를 해주는 것을 tui 로 하면 좀더 직관적이고 오류 가능성을 줄여 줄 수 있음.~~  
+~~- 하지만, 조금더 생각을 깊게 해야함.~~    
