@@ -38,3 +38,19 @@ func TestPublishVolumeAsOCI(t *testing.T) {
 	_, err = PublishVolumeAsOCI(context.Background(), volDir, indexPath, ociRepo, "v1.0.0")
 	assert.NoError(t, err)
 }
+
+//TODO 몇가지 버그가 있다. 수정해야 한다.
+
+// TestFetchVolumeFromOCI pushes a small volume to a local OCI store, fetches it back, and verifies
+// both file contents and VolumeIndex metadata.
+func TestFetchVolumeFromOCI(t *testing.T) {
+	ctx := context.Background()
+
+	repo := "../repo"
+	dest := "../test-vol-restored"
+	_, err := FetchVolumeFromOCI(ctx, dest, repo, "v1.0.0")
+	if err != nil {
+		t.Fatalf("FetchVolumeFromOCI failed: %v", err)
+	}
+
+}

@@ -292,6 +292,128 @@ func tarGzDir(fsDir, prefixPath string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// TODO 버그 있고 병렬적으로 가져오도록 해야 한다. 이건 테스트 진행해야 한다.
+
+// FetchVolumeFromOCI 은 repo:tag 로 푸시된 볼륨 아티팩트를 destRoot 아래에 풀고,
+// 재구성된 VolumeIndex 를 반환합니다.
+func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) (*VolumeIndex, error) {
+	// 1) OCI 스토어 열기
+	store, err := oci.New(repo)
+	if err != nil {
+		return nil, fmt.Errorf("OCI 스토어 열기 실패 %s: %w", repo, err)
+	}
+
+	// 2) 매니페스트 Descriptor 조회
+	ref := fmt.Sprintf("%s:%s", repo, tag)
+	manifestDesc, err := store.Resolve(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("해당 참조 조회 실패 %s: %w", ref, err)
+	}
+
+	rc, err := store.Fetch(ctx, manifestDesc)
+	if err != nil {
+		return nil, fmt.Errorf("매니페스트 Fetch 실패: %w", err)
+	}
+	defer rc.Close()
+
+	var manifest ocispec.Manifest
+	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("매니페스트 스트림 디코딩 실패: %w", err)
+	}
+
+	// 4) VolumeIndex 초기화
+	vi := &VolumeIndex{
+		VolumeRef:  manifestDesc.Digest.String(),
+		Partitions: make([]Partition, len(manifest.Layers)),
+	}
+
+	// 5) 각 레이어(파티션) 풀기
+	for i, layerDesc := range manifest.Layers {
+		// 레이어 Reader 얻기 (tar.gz)
+		rc, err := store.Fetch(ctx, layerDesc)
+		if err != nil {
+			return nil, fmt.Errorf("레이어 리더 생성 실패 %s: %w", layerDesc.Digest, err)
+		}
+		defer rc.Close()
+
+		// 원래 파티션 경로는 레이어 어노테이션에 저장돼 있다고 가정
+		partPath := layerDesc.Annotations["org.example.partitionPath"]
+		targetDir := filepath.Join(destRoot, partPath)
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			return nil, fmt.Errorf("디렉터리 생성 실패 %s: %w", targetDir, err)
+		}
+
+		// 압축 해제
+		if err := extractTarGz(rc, targetDir); err != nil {
+			return nil, fmt.Errorf("레이어 압축 해제 실패 %s: %w", layerDesc.Digest, err)
+		}
+
+		// VolumeIndex 에 기록
+		vi.Partitions[i] = Partition{
+			Name:        partPath,
+			Path:        partPath,
+			ManifestRef: layerDesc.Digest.String(),
+		}
+	}
+
+	// 6) volume-index.json 다시 쓰기 (선택)
+	indexBytes, err := json.MarshalIndent(vi, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("VolumeIndex 마샬링 실패: %w", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(destRoot, "volume-index.json"),
+		indexBytes,
+		0644,
+	); err != nil {
+		return nil, fmt.Errorf("volume-index.json 쓰기 실패: %w", err)
+	}
+
+	return vi, nil
+}
+
+// extractTarGz 는 gzip 스트림을 해제하여 dest 디렉터리에 tar 파일 내용을 풀어 줍니다.
+func extractTarGz(gzipStream io.Reader, dest string) error {
+	gz, err := gzip.NewReader(gzipStream)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break // 아카이브 끝
+		} else if err != nil {
+			return err
+		}
+
+		target := filepath.Join(dest, hdr.Name)
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			f, err := os.OpenFile(
+				target,
+				os.O_CREATE|os.O_WRONLY,
+				os.FileMode(hdr.Mode),
+			)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			f.Close()
+		}
+	}
+	return nil
+}
+
 // tarGzDirDeterministic creates a gzip-compressed tarball of fsDir in a deterministic way:
 // - gzip header timestamp fixed to Unix epoch
 // - entries sorted alphabetically
