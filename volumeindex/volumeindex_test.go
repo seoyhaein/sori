@@ -54,3 +54,22 @@ func TestFetchVolumeFromOCI(t *testing.T) {
 	}
 
 }
+
+// TestPushLocalToRemote_Harbor 실제 Harbor 레지스트리에 푸시
+func TestPushLocalToRemote_Harbor(t *testing.T) {
+	ctx := context.Background()
+
+	localTag := "v1.0.0"
+	remoteRepo := "harbor.local/demo-project/testrepo"
+	user := "admin"
+	pass := "Harbor12345"
+	repo := "../repo"
+
+	// 5) 실제 푸시 호출
+	if err := PushLocalToRemote(ctx, repo, localTag, remoteRepo, user, pass, true); err != nil {
+		t.Fatalf("Harbor 레지스트리 푸시 실패: %v", err)
+	}
+
+	t.Logf("✅ Harbor 에 성공적으로 푸시됨: %s:%s", remoteRepo, localTag)
+
+}

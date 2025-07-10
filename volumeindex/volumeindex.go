@@ -12,6 +12,9 @@ import (
 	"io"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
+	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/retry"
 	"os"
 	"path/filepath"
 	"sort"
@@ -235,6 +238,40 @@ func PublishVolumeAsOCI(ctx context.Context, rootPath, indexPath, repo, tag stri
 
 	fmt.Println("✅ Volume artifact saved to OCI store. Check", repo, "layout.")
 	return &vi, nil
+}
+
+func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user, pass string, plainHTTP bool) error {
+	// 1) Initialize local OCI store
+	srcStore, err := oci.New(localRepoPath)
+	if err != nil {
+		return fmt.Errorf("failed to init local OCI store: %w", err)
+	}
+
+	// 2) Connect to remote repository
+	repo, err := remote.NewRepository(remoteRepo)
+	if err != nil {
+		return fmt.Errorf("failed to connect to remote repository: %w", err)
+	}
+	// Use HTTP instead of HTTPS if requested
+	if plainHTTP {
+		repo.PlainHTTP = true
+	}
+
+	// 3) Set up authentication and retry client
+	repo.Client = &auth.Client{
+		Client:     retry.DefaultClient,
+		Cache:      auth.NewCache(),
+		Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{Username: user, Password: pass}),
+	}
+
+	// 4) Perform copy: local(tag) -> remote(tag)
+	pushedDesc, err := oras.Copy(ctx, srcStore, tag, repo, tag, oras.DefaultCopyOptions)
+	if err != nil {
+		return fmt.Errorf("failed to push to remote registry: %w", err)
+	}
+
+	fmt.Println("✅ Pushed to remote:", pushedDesc.Digest)
+	return nil
 }
 
 // tarGzDir creates a gzip-compressed tarball of fsDir. The tar entries retain the prefix prefixPath in their names.
