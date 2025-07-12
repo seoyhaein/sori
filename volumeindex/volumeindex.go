@@ -33,6 +33,8 @@ type Partition struct {
 	// ChunkSize       int      `json:"chunk_size,omitempty"`
 }
 
+// TODO annotation 빠져있음
+
 type VolumeIndex struct {
 	VolumeRef   string      `json:"volume_ref"`
 	DisplayName string      `json:"display_name"`
