@@ -52,7 +52,9 @@ proto.Unmarshal(data, &m)
 - 이미지 처리 부분과 맞다아 있음. 같이 고려해야함.  
 - https://github.com/seoyhaein/dockhouse 참고.  
 - tori 와 파일 포멧에 대해서 생각해줘야 함.  
-- 이 프로젝트는 라이브러리다.  팩키지로 개발된거 지워야 함.
+- 이 프로젝트는 라이브러리다.  팩키지로 개발된거 지워야 함.  
+- vsc 같은 경우 docker 에서 이미지들을 가져와서 뿌려주는 방시을 취하고 있다. 마찬자기로, json 파일과 접목해서 가져오되 버전을 가져와서 비교해보고  
+- 만약 버전이 같으면 가져오지 않고 json 을 로드 하는 형식으로 하고, 다르면 다른 부분을 가져와서 업데이트 하는 방식을 취한다    
 
 ### oras-go
 - https://github.com/oras-project/oras-go/blob/main/docs/tutorial/quickstart.md

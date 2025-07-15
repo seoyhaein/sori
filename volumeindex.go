@@ -327,6 +327,7 @@ func loadMetadataJSON(path string) ([]byte, error) {
 	return data, nil
 }
 
+// TODO 별도의 MediaType 을 설정할지 고민하자. 지금은 현재 image 를 차용해서 사용하고 있다.
 // PublishVolume 는 이미 파싱된 VolumeIndex 를 받아 OCI 스토어에 올리고, 업데이트된 VolumeIndex 를 리턴한다.
 func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
 	// 1) Init OCI store
