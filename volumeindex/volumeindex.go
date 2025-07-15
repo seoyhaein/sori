@@ -10,6 +10,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"io"
+	"io/fs"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
 	"oras.land/oras-go/v2/registry/remote"
@@ -42,13 +43,81 @@ type VolumeIndex struct {
 	Partitions  []Partition `json:"partitions"`
 }
 
+// VolumeCollection 여러 개의 VolumeIndex 를 담는 구조체
+type VolumeCollection struct {
+	Version int           `json:"version"` // 변경될 때마다 +1
+	Volumes []VolumeIndex `json:"volumes"`
+}
+
+// TODO 빠르게 개발하기 위해 서일단 그냥 막씀.
+
+const CollectionFileName = "volume-collection.json"
+
+// loadCollection: rootDir/volume-collection.json 이 있으면 언마샬, 없으면 빈 컬렉션 반환
+func loadCollection(rootDir string) (VolumeCollection, error) {
+	var coll VolumeCollection
+	path := filepath.Join(rootDir, CollectionFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return coll, nil
+		}
+		return coll, err
+	}
+	if err := json.Unmarshal(data, &coll); err != nil {
+		return coll, err
+	}
+	return coll, nil
+}
+
+// saveCollection: coll 을 rootDir/volume-collection.json 에 저장
+func saveCollection(rootDir string, coll VolumeCollection) error {
+	path := filepath.Join(rootDir, CollectionFileName)
+	data, err := json.MarshalIndent(coll, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// HasVolume VolumeCollection 에 추가할 인덱스가 이미 들어있는지 검사합니다.
+func (c *VolumeCollection) HasVolume(vi VolumeIndex) bool {
+	for _, existing := range c.Volumes {
+		// DisplayName 또는 VolumeRef 중 하나라도 같으면 이미 존재한 것으로 간주
+		if existing.DisplayName == vi.DisplayName || existing.VolumeRef == vi.VolumeRef {
+			return true
+		}
+	}
+	return false
+}
+
+// Merge 새 컬렉션을 기존 컬렉션에 병합합니다.
+//   - 중복되지 않은 VolumeIndex만 추가
+//   - 하나라도 추가되면 Version을 +1 하고 true를 리턴
+//   - 아무것도 추가되지 않으면 false를 리턴
+func (c *VolumeCollection) Merge(newColl VolumeCollection) bool {
+	added := false
+
+	for _, vi := range newColl.Volumes {
+		if !c.HasVolume(vi) {
+			c.Volumes = append(c.Volumes, vi)
+			added = true
+		}
+	}
+
+	if added {
+		c.Version++
+	}
+	return added
+}
+
 // TODO volume-index.json 이거 받도록 해주고, 이거 제외해줘야 한다. 다른 폴더에 저장하던가.
 // TODO json 분리하는 방안도 생각해보자.
 
-// GenerateVolumeIndex scans rootPath recursively to build a VolumeIndex.
+// GenerateVolumeIndex1 scans rootPath recursively to build a VolumeIndex.
 // If a directory contains a "no_deep_scan" file, it will be recorded as a single partition
 // and its subdirectories will be skipped.
-func GenerateVolumeIndex(rootPath, displayName string) (*VolumeIndex, error) {
+func GenerateVolumeIndexOld(rootPath, displayName string) (*VolumeIndex, error) {
 	// record generation time in UTC (rounded to seconds)
 	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
 
@@ -117,6 +186,70 @@ func GenerateVolumeIndex(rootPath, displayName string) (*VolumeIndex, error) {
 	}, nil
 }
 
+func GenerateVolumeIndex(rootPath, displayName string) (*VolumeIndex, error) {
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	rootBase := filepath.Base(rootPath)
+	var parts []Partition
+	//  Golang 1.16 에 적용됨. os.Stat 사용안해도 됨.
+	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("error accessing %s: %w", path, err)
+		}
+		// 루트 자체는 건너뛴다
+		if path == rootPath {
+			return nil
+		}
+		// 디렉토리가 아니면 스킵
+		if !d.IsDir() {
+			return nil
+		}
+
+		// 디렉토리 내부를 한 번에 읽어서 marker 존재 확인
+		entries, readErr := os.ReadDir(path)
+		if readErr != nil {
+			return fmt.Errorf("failed to read dir %s: %w", path, readErr)
+		}
+		hasMarker := false
+		for _, e := range entries {
+			if e.Name() == "no_deep_scan" && !e.IsDir() {
+				hasMarker = true
+				break
+			}
+		}
+
+		// 상대경로 계산 및 parts 추가
+		rel, relErr := filepath.Rel(rootPath, path)
+		if relErr != nil {
+			return fmt.Errorf("failed to get rel path for %s: %w", path, relErr)
+		}
+		slashRel := filepath.ToSlash(rel)
+		fullPath := fmt.Sprintf("%s/%s", rootBase, slashRel)
+		parts = append(parts, Partition{
+			Name:        d.Name(),
+			Path:        fullPath,
+			ManifestRef: "",
+			CreatedAt:   now,
+			Compression: "",
+		})
+
+		// marker 가 있으면 하위 트리 스킵
+		if hasMarker {
+			return fs.SkipDir
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error scanning directories: %w", err)
+	}
+
+	return &VolumeIndex{
+		VolumeRef:   "",
+		DisplayName: displayName,
+		CreatedAt:   now,
+		Partitions:  parts,
+	}, nil
+}
+
 // SaveToFile writes the VolumeIndex as JSON to "volume-index.json" under rootPath.
 func (vi *VolumeIndex) SaveToFile(rootPath string) error {
 	outFile := filepath.Join(rootPath, "volume-index.json")
@@ -129,6 +262,8 @@ func (vi *VolumeIndex) SaveToFile(rootPath string) error {
 	}
 	return nil
 }
+
+// TODO 중복된 값이 들어갔을때 어떻게 처리하는지 확인해야 함.
 
 // PublishVolumeAsOCI reads a volume-index.json at indexPath under rootPath,
 // creates an OCI layout in `repo`, pushes a config and one layer per partition,
@@ -240,6 +375,46 @@ func PublishVolumeAsOCI(ctx context.Context, rootPath, indexPath, repo, tag stri
 
 	fmt.Println("✅ Volume artifact saved to OCI store. Check", repo, "layout.")
 	return &vi, nil
+}
+
+func BatchCreateVolumes(ctx context.Context, dirs []string, displayNamePrefix, ociRepo, tag string) (VolumeCollection, error) {
+	coll := VolumeCollection{
+		Version: 0, // 나중에 호출부에서 처리
+		Volumes: make([]VolumeIndex, 0, len(dirs)),
+	}
+
+	for _, dir := range dirs {
+		// 1) 로컬 인덱스 생성
+		localVI, err := GenerateVolumeIndex(
+			dir,
+			fmt.Sprintf("%s-%s", displayNamePrefix, filepath.Base(dir)),
+		)
+		if err != nil {
+			return coll, fmt.Errorf("generate index for %s: %w", dir, err)
+		}
+
+		// 2) 디스크에 저장
+		if err := localVI.SaveToFile(dir); err != nil {
+			return coll, fmt.Errorf("save index for %s: %w", dir, err)
+		}
+
+		// 3) OCI 레지스트리에 퍼블리시
+		viOCI, err := PublishVolumeAsOCI(
+			ctx,
+			dir,
+			filepath.Join(dir, "volume-index.json"),
+			ociRepo,
+			tag,
+		)
+		if err != nil {
+			return coll, fmt.Errorf("publish %s: %w", dir, err)
+		}
+
+		// 4) 리턴된 *VolumeIndex 를 모아서
+		coll.Volumes = append(coll.Volumes, *viOCI)
+	}
+
+	return coll, nil
 }
 
 func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user, pass string, plainHTTP bool) error {
