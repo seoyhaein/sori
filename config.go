@@ -1,4 +1,4 @@
-package config
+package sori
 
 import (
 	"encoding/json"

@@ -1,4 +1,4 @@
-package volumeindex
+package sori
 
 import (
 	"context"

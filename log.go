@@ -1,4 +1,4 @@
-package log
+package sori
 
 import "github.com/sirupsen/logrus"
 

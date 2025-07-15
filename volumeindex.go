@@ -1,4 +1,4 @@
-package volumeindex
+package sori
 
 import (
 	"archive/tar"
@@ -28,13 +28,10 @@ type Partition struct {
 	Path        string `json:"path"`
 	ManifestRef string `json:"manifest_ref"`
 	CreatedAt   string `json:"created_at"`
-	// IncludePatterns []string `json:"include_patterns,omitempty"`
-	// ExcludePatterns []string `json:"exclude_patterns,omitempty"`
 	Compression string `json:"compression"`
-	// ChunkSize       int      `json:"chunk_size,omitempty"`
 }
 
-// TODO annotation 빠져있음
+// TODO annotation 은 config blob 으로 빠짐. 사용자에게 json 을 만들도록 해주었음. 따로 필드를 만들어주지 않음. 한번 생각해보자. 이방법이 더 나을듯한데.
 
 type VolumeIndex struct {
 	VolumeRef   string      `json:"volume_ref"`
@@ -52,6 +49,7 @@ type VolumeCollection struct {
 // TODO 빠르게 개발하기 위해 서일단 그냥 막씀.
 
 const CollectionFileName = "volume-collection.json"
+const OCIStore = "../repo"
 
 // loadCollection: rootDir/volume-collection.json 이 있으면 언마샬, 없으면 빈 컬렉션 반환
 func loadCollection(rootDir string) (VolumeCollection, error) {
@@ -113,78 +111,6 @@ func (c *VolumeCollection) Merge(newColl VolumeCollection) bool {
 
 // TODO volume-index.json 이거 받도록 해주고, 이거 제외해줘야 한다. 다른 폴더에 저장하던가.
 // TODO json 분리하는 방안도 생각해보자.
-
-// GenerateVolumeIndex1 scans rootPath recursively to build a VolumeIndex.
-// If a directory contains a "no_deep_scan" file, it will be recorded as a single partition
-// and its subdirectories will be skipped.
-func GenerateVolumeIndexOld(rootPath, displayName string) (*VolumeIndex, error) {
-	// record generation time in UTC (rounded to seconds)
-	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
-
-	// base folder name
-	rootBase := filepath.Base(rootPath)
-
-	var parts []Partition
-	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return fmt.Errorf("error accessing %s: %w", path, err)
-		}
-		// skip the root itself
-		if path == rootPath {
-			return nil
-		}
-		// only consider directories
-		if !info.IsDir() {
-			return nil
-		}
-
-		// if no_deep_scan marker exists, record and skip subdirs
-		marker := filepath.Join(path, "no_deep_scan")
-		if _, err := os.Stat(marker); err == nil {
-			rel, err := filepath.Rel(rootPath, path)
-			if err != nil {
-				return fmt.Errorf("failed to get rel path for %s: %w", path, err)
-			}
-			slashRel := filepath.ToSlash(rel)
-			fullPath := fmt.Sprintf("%s/%s", rootBase, slashRel)
-			parts = append(parts, Partition{
-				Name:        info.Name(),
-				Path:        fullPath,
-				ManifestRef: "",
-				CreatedAt:   now,
-				Compression: "",
-			})
-			// skip this directory's children
-			return filepath.SkipDir
-		}
-
-		// normal directory: record it
-		rel, err := filepath.Rel(rootPath, path)
-		if err != nil {
-			return fmt.Errorf("failed to get rel path for %s: %w", path, err)
-		}
-		slashRel := filepath.ToSlash(rel)
-		fullPath := fmt.Sprintf("%s/%s", rootBase, slashRel)
-		parts = append(parts, Partition{
-			Name:        info.Name(),
-			Path:        fullPath,
-			ManifestRef: "",
-			CreatedAt:   now,
-			Compression: "",
-		})
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error scanning directories: %w", err)
-	}
-
-	return &VolumeIndex{
-		VolumeRef:   "",
-		DisplayName: displayName,
-		CreatedAt:   now,
-		Partitions:  parts,
-	}, nil
-}
 
 func GenerateVolumeIndex(rootPath, displayName string) (*VolumeIndex, error) {
 	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
@@ -263,158 +189,232 @@ func (vi *VolumeIndex) SaveToFile(rootPath string) error {
 	return nil
 }
 
-// TODO 중복된 값이 들어갔을때 어떻게 처리하는지 확인해야 함.
-
 // PublishVolumeAsOCI reads a volume-index.json at indexPath under rootPath,
 // creates an OCI layout in `repo`, pushes a config and one layer per partition,
 // then packs and tags a manifest with the given tag.
-func PublishVolumeAsOCI(ctx context.Context, rootPath, indexPath, repo, tag string) (*VolumeIndex, error) {
-	// 1) Read existing volume index JSON
-	indexData, err := os.ReadFile(indexPath)
+func PublishVolumeAsOCI(ctx context.Context, rootPath, indexPath, repo, tag string, configBlob []byte) (*VolumeIndex, error) {
+	// 1) Load volume index
+	data, err := os.ReadFile(indexPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read index file %s: %w", indexPath, err)
+		return nil, fmt.Errorf("read index file %q: %w", indexPath, err)
 	}
 	var vi VolumeIndex
-	if err := json.Unmarshal(indexData, &vi); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal volume index: %w", err)
+	if err := json.Unmarshal(data, &vi); err != nil {
+		return nil, fmt.Errorf("unmarshal volume index: %w", err)
 	}
 
-	// 2) Initialize local OCI store
+	// 2) Init OCI store
 	store, err := oci.New(repo)
 	if err != nil {
-		return nil, fmt.Errorf("failed to init OCI store: %w", err)
+		return nil, fmt.Errorf("init OCI store: %w", err)
 	}
 
-	// 3) Push a minimal config descriptor if not exists
-	config := []byte("{\"architecture\":\"amd64\",\"os\":\"linux\"}")
+	// helper: descriptor 가 없으면 push
+	pushIfNeeded := func(desc ocispec.Descriptor, r io.Reader) error {
+		exists, err := store.Exists(ctx, desc)
+		if err != nil {
+			return fmt.Errorf("check exists (%s): %w", desc.Digest, err)
+		}
+		if exists {
+			return nil
+		}
+		if err := store.Push(ctx, desc, r); err != nil {
+			return fmt.Errorf("push blob (%s): %w", desc.Digest, err)
+		}
+		return nil
+	}
+
+	// 3) Push config blob
 	configDesc := ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageConfig,
-		Digest:    digest.FromBytes(config),
-		Size:      int64(len(config)),
+		Digest:    digest.FromBytes(configBlob),
+		Size:      int64(len(configBlob)),
+	}
+	if err := pushIfNeeded(configDesc, bytes.NewReader(configBlob)); err != nil {
+		return nil, err
 	}
 
-	exists, err := store.Exists(ctx, configDesc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check existence: %w", err)
-	}
-	if !exists {
-		// not exists, push
-		if err := store.Push(ctx, configDesc, bytes.NewReader(config)); err != nil {
-			return nil, fmt.Errorf("failed to push config: %w", err)
-		}
-	}
-
-	// 4) For each partition, create deterministic gzip layer, push if digest new, and record its digest
+	// 4) Pack and push each layer
 	rootBase := filepath.Base(rootPath)
-	var layers []ocispec.Descriptor
-	for i, part := range vi.Partitions {
-		relPath := strings.TrimPrefix(part.Path, rootBase+"/")
-		fsPath := filepath.Join(rootPath, relPath)
+	layers := make([]ocispec.Descriptor, 0, len(vi.Partitions))
+	for i := range vi.Partitions {
+		part := &vi.Partitions[i]
+		fsPath := filepath.Join(rootPath, strings.TrimPrefix(part.Path, rootBase+"/"))
 
-		// Create deterministic tar.gz of that directory
 		layerData, err := tarGzDirDeterministic(fsPath, part.Path)
 		if err != nil {
-			return nil, fmt.Errorf("failed to tar.gz %s: %w", fsPath, err)
+			return nil, fmt.Errorf("tar.gz %q: %w", fsPath, err)
 		}
 
-		// Create descriptor
-		dgst := digest.FromBytes(layerData)
 		desc := ocispec.Descriptor{
 			MediaType: ocispec.MediaTypeImageLayerGzip,
-			Digest:    dgst,
+			Digest:    digest.FromBytes(layerData),
 			Size:      int64(len(layerData)),
 		}
-
-		// Push only if not exists
-		exists2, err := store.Exists(ctx, desc)
-		if err != nil {
-			return nil, fmt.Errorf("failed to check existence: %w", err)
+		if err := pushIfNeeded(desc, bytes.NewReader(layerData)); err != nil {
+			return nil, fmt.Errorf("push layer %s: %w", part.Name, err)
 		}
 
-		if !exists2 {
-			if err := store.Push(ctx, desc, bytes.NewReader(layerData)); err != nil {
-				return nil, fmt.Errorf("failed to push layer %s: %w", part.Name, err)
-			}
-		}
-
-		// Update partition manifest_ref and layers
-		vi.Partitions[i].ManifestRef = desc.Digest.String()
+		part.ManifestRef = desc.Digest.String()
 		layers = append(layers, desc)
 	}
 
-	// 5) Pack manifest (config + layers)
-	manifestDesc, err := oras.PackManifest(
-		ctx,
-		store,
-		oras.PackManifestVersion1_1,
+	// 5) Create & tag manifest
+	manifestDesc, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1,
 		ocispec.MediaTypeImageManifest,
 		oras.PackManifestOptions{
-			ConfigDescriptor:    &configDesc,
-			Layers:              layers,
-			ManifestAnnotations: map[string]string{ocispec.AnnotationCreated: time.Now().UTC().Format(time.RFC3339)},
+			ConfigDescriptor: &configDesc,
+			Layers:           layers,
+			ManifestAnnotations: map[string]string{
+				ocispec.AnnotationCreated: time.Now().UTC().Format(time.RFC3339),
+			},
 		},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to pack manifest: %w", err)
+		return nil, fmt.Errorf("pack manifest: %w", err)
 	}
 
-	// 6) Record and tag the manifest digest
 	vi.VolumeRef = manifestDesc.Digest.String()
 	if err := store.Tag(ctx, manifestDesc, tag); err != nil {
-		return nil, fmt.Errorf("failed to tag manifest: %w", err)
+		return nil, fmt.Errorf("tag manifest %q: %w", tag, err)
 	}
 
-	// 7) Rewrite volume-index.json with updated refs
-	updatedData, err := json.MarshalIndent(vi, "", "  ")
+	// 6) Persist updated index
+	out, err := json.MarshalIndent(vi, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal updated volume index: %w", err)
+		return nil, fmt.Errorf("marshal updated index: %w", err)
 	}
-	if err := os.WriteFile(indexPath, updatedData, 0644); err != nil {
-		return nil, fmt.Errorf("failed to write updated index file: %w", err)
+	if err := os.WriteFile(indexPath, out, 0o644); err != nil {
+		return nil, fmt.Errorf("write updated index: %w", err)
 	}
 
-	fmt.Println("✅ Volume artifact saved to OCI store. Check", repo, "layout.")
+	fmt.Printf("✅ Volume artifact %s:%s saved\n", repo, tag)
 	return &vi, nil
 }
 
-func BatchCreateVolumes(ctx context.Context, dirs []string, displayNamePrefix, ociRepo, tag string) (VolumeCollection, error) {
-	coll := VolumeCollection{
-		Version: 0, // 나중에 호출부에서 처리
-		Volumes: make([]VolumeIndex, 0, len(dirs)),
+// loadMetadataJSON 임의의 json 파일을 읽어와서 []byte 로 변환
+func loadMetadataJSON(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read JSON file %s: %w", path, err)
+	}
+	// 선택적으로 JSON 유효성 검사
+	var tmp interface{}
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return nil, fmt.Errorf("invalid JSON in %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// PublishVolume 는 이미 파싱된 VolumeIndex 를 받아 OCI 스토어에 올리고, 업데이트된 VolumeIndex 를 리턴한다.
+func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
+	// 1) Init OCI store
+	store, err := oci.New(OCIStore)
+	if err != nil {
+		return nil, fmt.Errorf("init OCI store: %w", err)
 	}
 
-	for _, dir := range dirs {
-		// 1) 로컬 인덱스 생성
-		localVI, err := GenerateVolumeIndex(
-			dir,
-			fmt.Sprintf("%s-%s", displayNamePrefix, filepath.Base(dir)),
-		)
+	// helper: descriptor 가 없으면 push
+	pushIfNeeded := func(desc ocispec.Descriptor, r io.Reader) error {
+		exists, err := store.Exists(ctx, desc)
 		if err != nil {
-			return coll, fmt.Errorf("generate index for %s: %w", dir, err)
+			return fmt.Errorf("check exists (%s): %w", desc.Digest, err)
 		}
-
-		// 2) 디스크에 저장
-		if err := localVI.SaveToFile(dir); err != nil {
-			return coll, fmt.Errorf("save index for %s: %w", dir, err)
+		if exists {
+			return nil
 		}
-
-		// 3) OCI 레지스트리에 퍼블리시
-		viOCI, err := PublishVolumeAsOCI(
-			ctx,
-			dir,
-			filepath.Join(dir, "volume-index.json"),
-			ociRepo,
-			tag,
-		)
-		if err != nil {
-			return coll, fmt.Errorf("publish %s: %w", dir, err)
+		if err := store.Push(ctx, desc, r); err != nil {
+			return fmt.Errorf("push blob (%s): %w", desc.Digest, err)
 		}
-
-		// 4) 리턴된 *VolumeIndex 를 모아서
-		coll.Volumes = append(coll.Volumes, *viOCI)
+		return nil
 	}
 
-	return coll, nil
+	// 2) Push config blob
+	configDesc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageConfig,
+		Digest:    digest.FromBytes(configBlob),
+		Size:      int64(len(configBlob)),
+	}
+	if err := pushIfNeeded(configDesc, bytes.NewReader(configBlob)); err != nil {
+		return nil, err
+	}
+
+	// 3) Pack and push each layer
+	rootBase := filepath.Base(volPath)
+	layers := make([]ocispec.Descriptor, 0, len(vi.Partitions))
+	for i := range vi.Partitions {
+		part := &vi.Partitions[i]
+		fsPath := filepath.Join(volPath, strings.TrimPrefix(part.Path, rootBase+"/"))
+
+		layerData, err := tarGzDirDeterministic(fsPath, part.Path)
+		if err != nil {
+			return nil, fmt.Errorf("tar.gz %q: %w", fsPath, err)
+		}
+
+		desc := ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageLayerGzip,
+			Digest:    digest.FromBytes(layerData),
+			Size:      int64(len(layerData)),
+		}
+		if err := pushIfNeeded(desc, bytes.NewReader(layerData)); err != nil {
+			return nil, fmt.Errorf("push layer %s: %w", part.Name, err)
+		}
+
+		part.ManifestRef = desc.Digest.String()
+		layers = append(layers, desc)
+	}
+
+	// 4) Create & tag manifest
+	manifestDesc, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1,
+		ocispec.MediaTypeImageManifest,
+		oras.PackManifestOptions{
+			ConfigDescriptor: &configDesc,
+			Layers:           layers,
+			ManifestAnnotations: map[string]string{
+				ocispec.AnnotationCreated: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("pack manifest: %w", err)
+	}
+
+	vi.VolumeRef = manifestDesc.Digest.String()
+	if err := store.Tag(ctx, manifestDesc, volName); err != nil {
+		return nil, fmt.Errorf("tag manifest %q: %w", volName, err)
+	}
+
+	// 5) 결과 반환 (파일 쓰기는 호출자에게)
+	Log.Infof("Volume artifact %s saved\n", volName)
+	return vi, nil
+}
+
+// TODO 메서드 바뀔 수 있음. 일단 이렇게 해둠. 서비스 방식에 따라 달라질 수 있음.
+
+// NewVolumeCollection 생성 시 초기 Version을 1 로 설정
+func NewVolumeCollection(initialVolumes ...VolumeIndex) *VolumeCollection {
+	coll := &VolumeCollection{
+		Version: 1,
+		Volumes: make([]VolumeIndex, len(initialVolumes)),
+	}
+	copy(coll.Volumes, initialVolumes)
+	return coll
+}
+
+// AddVolume Volumes에 새 Volume을 append하고 Version  +1
+func (c *VolumeCollection) AddVolume(v VolumeIndex) {
+	c.Volumes = append(c.Volumes, v)
+	c.Version++
+}
+
+// RemoveVolume 인덱스 위치의 Volume을 삭제하고 Version +1
+func (c *VolumeCollection) RemoveVolume(idx int) error {
+	if idx < 0 || idx >= len(c.Volumes) {
+		return fmt.Errorf("index %d out of range", idx)
+	}
+	c.Volumes = append(c.Volumes[:idx], c.Volumes[idx+1:]...)
+	c.Version++
+	return nil
 }
 
 func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user, pass string, plainHTTP bool) error {
