@@ -292,6 +292,27 @@ func PublishVolumeAsOCI(ctx context.Context, rootPath, indexPath, repo, tag stri
 	return &vi, nil
 }
 
+// TODO 파일 이름은 고정해두어야 할 거같은데 정하지 못했다.
+// TODO 이렇게 임의의 key, value 로 잡아 두도록 한다.
+
+/*
+{
+  "referenceName": "GRCh38",
+  "organism": "Homo sapiens",
+  "sequenceCount": 24,
+  "totalBaseCount": 3200456742,
+  "format": "FASTA.GZ",
+  "compression": "gzip",
+  "lineWrap": 60,
+  "created": "2025-07-15T19:30:00Z",
+  "pipelineVersion": "v2.3.1",
+  "checksum": "sha256:abcdef1234567890…",
+  "checksumAlgorithm": "sha256",
+  "description": "Primary tumor WGS FASTA, trimmed and filtered",
+  "notes": "Adapters removed with Trimmomatic v0.39; low-quality bases (<Q20) filtered"
+}
+*/
+
 // loadMetadataJSON 임의의 json 파일을 읽어와서 []byte 로 변환
 func loadMetadataJSON(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
