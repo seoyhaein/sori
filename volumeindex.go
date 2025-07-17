@@ -49,7 +49,7 @@ type VolumeCollection struct {
 // TODO 빠르게 개발하기 위해 서일단 그냥 막씀.
 
 const CollectionFileName = "volume-collection.json"
-const OCIStore = "../repo"
+const OCIStore = "./repo"
 
 // loadCollection: rootDir/volume-collection.json 이 있으면 언마샬, 없으면 빈 컬렉션 반환
 func loadCollection(rootDir string) (VolumeCollection, error) {
@@ -112,6 +112,7 @@ func (c *VolumeCollection) Merge(newColl VolumeCollection) bool {
 // TODO volume-index.json 이거 받도록 해주고, 이거 제외해줘야 한다. 다른 폴더에 저장하던가.
 // TODO json 분리하는 방안도 생각해보자.
 
+// GenerateVolumeIndex 디렉토리를 검사하면서 초기 VolumeIndex 를 생성함. displayName 사용자에게 보여줄 volume 이름.
 func GenerateVolumeIndex(rootPath, displayName string) (*VolumeIndex, error) {
 	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
 	rootBase := filepath.Base(rootPath)
@@ -189,109 +190,6 @@ func (vi *VolumeIndex) SaveToFile(rootPath string) error {
 	return nil
 }
 
-// PublishVolumeAsOCI reads a volume-index.json at indexPath under rootPath,
-// creates an OCI layout in `repo`, pushes a config and one layer per partition,
-// then packs and tags a manifest with the given tag.
-func PublishVolumeAsOCI(ctx context.Context, rootPath, indexPath, repo, tag string, configBlob []byte) (*VolumeIndex, error) {
-	// 1) Load volume index
-	data, err := os.ReadFile(indexPath)
-	if err != nil {
-		return nil, fmt.Errorf("read index file %q: %w", indexPath, err)
-	}
-	var vi VolumeIndex
-	if err := json.Unmarshal(data, &vi); err != nil {
-		return nil, fmt.Errorf("unmarshal volume index: %w", err)
-	}
-
-	// 2) Init OCI store
-	store, err := oci.New(repo)
-	if err != nil {
-		return nil, fmt.Errorf("init OCI store: %w", err)
-	}
-
-	// helper: descriptor 가 없으면 push
-	pushIfNeeded := func(desc ocispec.Descriptor, r io.Reader) error {
-		exists, err := store.Exists(ctx, desc)
-		if err != nil {
-			return fmt.Errorf("check exists (%s): %w", desc.Digest, err)
-		}
-		if exists {
-			return nil
-		}
-		if err := store.Push(ctx, desc, r); err != nil {
-			return fmt.Errorf("push blob (%s): %w", desc.Digest, err)
-		}
-		return nil
-	}
-
-	// 3) Push config blob
-	configDesc := ocispec.Descriptor{
-		MediaType: ocispec.MediaTypeImageConfig,
-		Digest:    digest.FromBytes(configBlob),
-		Size:      int64(len(configBlob)),
-	}
-	if err := pushIfNeeded(configDesc, bytes.NewReader(configBlob)); err != nil {
-		return nil, err
-	}
-
-	// 4) Pack and push each layer
-	rootBase := filepath.Base(rootPath)
-	layers := make([]ocispec.Descriptor, 0, len(vi.Partitions))
-	for i := range vi.Partitions {
-		part := &vi.Partitions[i]
-		fsPath := filepath.Join(rootPath, strings.TrimPrefix(part.Path, rootBase+"/"))
-
-		layerData, err := tarGzDirDeterministic(fsPath, part.Path)
-		if err != nil {
-			return nil, fmt.Errorf("tar.gz %q: %w", fsPath, err)
-		}
-
-		desc := ocispec.Descriptor{
-			MediaType: ocispec.MediaTypeImageLayerGzip,
-			Digest:    digest.FromBytes(layerData),
-			Size:      int64(len(layerData)),
-		}
-		if err := pushIfNeeded(desc, bytes.NewReader(layerData)); err != nil {
-			return nil, fmt.Errorf("push layer %s: %w", part.Name, err)
-		}
-
-		part.ManifestRef = desc.Digest.String()
-		layers = append(layers, desc)
-	}
-
-	// 5) Create & tag manifest
-	manifestDesc, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1,
-		ocispec.MediaTypeImageManifest,
-		oras.PackManifestOptions{
-			ConfigDescriptor: &configDesc,
-			Layers:           layers,
-			ManifestAnnotations: map[string]string{
-				ocispec.AnnotationCreated: time.Now().UTC().Format(time.RFC3339),
-			},
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("pack manifest: %w", err)
-	}
-
-	vi.VolumeRef = manifestDesc.Digest.String()
-	if err := store.Tag(ctx, manifestDesc, tag); err != nil {
-		return nil, fmt.Errorf("tag manifest %q: %w", tag, err)
-	}
-
-	// 6) Persist updated index
-	out, err := json.MarshalIndent(vi, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("marshal updated index: %w", err)
-	}
-	if err := os.WriteFile(indexPath, out, 0o644); err != nil {
-		return nil, fmt.Errorf("write updated index: %w", err)
-	}
-
-	fmt.Printf("✅ Volume artifact %s:%s saved\n", repo, tag)
-	return &vi, nil
-}
-
 // TODO 파일 이름은 고정해두어야 할 거같은데 정하지 못했다.
 // TODO 이렇게 임의의 key, value 로 잡아 두도록 한다.
 
@@ -313,7 +211,7 @@ func PublishVolumeAsOCI(ctx context.Context, rootPath, indexPath, repo, tag stri
 }
 */
 
-// loadMetadataJSON 임의의 json 파일을 읽어와서 []byte 로 변환
+// loadMetadataJSON (위의) 임의의 json 파일을 읽어와서 []byte 로 변환, -> config blob 으로 채워짐.
 func loadMetadataJSON(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -328,7 +226,8 @@ func loadMetadataJSON(path string) ([]byte, error) {
 }
 
 // TODO 별도의 MediaType 을 설정할지 고민하자. 지금은 현재 image 를 차용해서 사용하고 있다.
-// PublishVolume 는 이미 파싱된 VolumeIndex 를 받아 OCI 스토어에 올리고, 업데이트된 VolumeIndex 를 리턴한다.
+
+// PublishVolume GenerateVolumeIndex 에서 생성된 VolumeIndex 를 받아 OCI 스토어에 올리고, 업데이트된 VolumeIndex 를 리턴한다. volName 은 tag 까지 포함한다.
 func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
 	// 1) Init OCI store
 	store, err := oci.New(OCIStore)
@@ -343,6 +242,7 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 			return fmt.Errorf("check exists (%s): %w", desc.Digest, err)
 		}
 		if exists {
+			Log.Info("Blob already exists, skipping push: ", desc.Digest)
 			return nil
 		}
 		if err := store.Push(ctx, desc, r); err != nil {
@@ -364,26 +264,44 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 	// 3) Pack and push each layer
 	rootBase := filepath.Base(volPath)
 	layers := make([]ocispec.Descriptor, 0, len(vi.Partitions))
-	for i := range vi.Partitions {
-		part := &vi.Partitions[i]
-		fsPath := filepath.Join(volPath, strings.TrimPrefix(part.Path, rootBase+"/"))
 
-		layerData, err := tarGzDirDeterministic(fsPath, part.Path)
+	if len(vi.Partitions) == 0 {
+		// 파티션 정보가 없으면 volPath 전체를 한 레이어로 묶어서 처리
+		layerData, err := tarGzDirDeterministic(volPath, rootBase)
 		if err != nil {
-			return nil, fmt.Errorf("tar.gz %q: %w", fsPath, err)
+			return nil, fmt.Errorf("tar.gz fallback %q: %w", volPath, err)
 		}
-
 		desc := ocispec.Descriptor{
 			MediaType: ocispec.MediaTypeImageLayerGzip,
 			Digest:    digest.FromBytes(layerData),
 			Size:      int64(len(layerData)),
 		}
 		if err := pushIfNeeded(desc, bytes.NewReader(layerData)); err != nil {
-			return nil, fmt.Errorf("push layer %s: %w", part.Name, err)
+			return nil, fmt.Errorf("push fallback layer: %w", err)
 		}
-
-		part.ManifestRef = desc.Digest.String()
 		layers = append(layers, desc)
+	} else {
+		for i := range vi.Partitions {
+			part := &vi.Partitions[i]
+			fsPath := filepath.Join(volPath, strings.TrimPrefix(part.Path, rootBase+"/"))
+
+			layerData, err := tarGzDirDeterministic(fsPath, part.Path)
+			if err != nil {
+				return nil, fmt.Errorf("tar.gz %q: %w", fsPath, err)
+			}
+
+			desc := ocispec.Descriptor{
+				MediaType: ocispec.MediaTypeImageLayerGzip,
+				Digest:    digest.FromBytes(layerData),
+				Size:      int64(len(layerData)),
+			}
+			if err := pushIfNeeded(desc, bytes.NewReader(layerData)); err != nil {
+				return nil, fmt.Errorf("push layer %s: %w", part.Name, err)
+			}
+
+			part.ManifestRef = desc.Digest.String()
+			layers = append(layers, desc)
+		}
 	}
 
 	// 4) Create & tag manifest
@@ -429,7 +347,7 @@ func (c *VolumeCollection) AddVolume(v VolumeIndex) {
 	c.Version++
 }
 
-// RemoveVolume 인덱스 위치의 Volume을 삭제하고 Version +1
+// RemoveVolume 인덱스 위치의 Volume 을 삭제하고 Version +1
 func (c *VolumeCollection) RemoveVolume(idx int) error {
 	if idx < 0 || idx >= len(c.Volumes) {
 		return fmt.Errorf("index %d out of range", idx)
@@ -469,69 +387,14 @@ func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user
 		return fmt.Errorf("failed to push to remote registry: %w", err)
 	}
 
-	fmt.Println("✅ Pushed to remote:", pushedDesc.Digest)
+	fmt.Println("Pushed to remote:", pushedDesc.Digest)
 	return nil
-}
-
-// tarGzDir creates a gzip-compressed tarball of fsDir. The tar entries retain the prefix prefixPath in their names.
-func tarGzDir(fsDir, prefixPath string) ([]byte, error) {
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gw)
-
-	// walk the directory
-	err := filepath.Walk(fsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// Create header
-		rel, err := filepath.Rel(filepath.Dir(fsDir), path)
-		if err != nil {
-			return err
-		}
-		// Build tar header name: prefixPath + relative subpath
-		tarName := filepath.ToSlash(filepath.Join(prefixPath, rel))
-		hdr, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		hdr.Name = tarName
-
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-
-		// If not a regular file, skip writing body
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-
-		// Write file content
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-
-		if _, err := io.Copy(tw, f); err != nil {
-			return err
-		}
-		return nil
-	})
-	// close writers
-	tw.Close()
-	gw.Close()
-
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
 
 // TODO 버그 있고 병렬적으로 가져오도록 해야 한다. 이건 테스트 진행해야 한다.
 
 // FetchVolumeFromOCI 은 repo:tag 로 푸시된 볼륨 아티팩트를 destRoot 아래에 풀고,
-// 재구성된 VolumeIndex 를 반환합니다.
+// 재구성된 VolumeIndex 를 반환함. TODO 수정해줘야 함.
 func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) (*VolumeIndex, error) {
 	// 1) OCI 스토어 열기
 	store, err := oci.New(repo)
@@ -650,75 +513,93 @@ func extractTarGz(gzipStream io.Reader, dest string) error {
 	return nil
 }
 
-// tarGzDirDeterministic creates a gzip-compressed tarball of fsDir in a deterministic way:
-// - gzip header timestamp fixed to Unix epoch
-// - entries sorted alphabetically
-// - consistent compression level
+// tarGzDirDeterministic 입력값이 변하지 않는다면 sha 를 고정적으로 만들어주면서 압축된 tarball 만들어줌.
 func tarGzDirDeterministic(fsDir, prefixPath string) ([]byte, error) {
-	// Gather entries
-	var paths []string
-	err := filepath.Walk(fsDir, func(path string, info os.FileInfo, err error) error {
+	// 1) Collect all paths
+	var entries []string
+	if err := filepath.WalkDir(fsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		paths = append(paths, path)
+		entries = append(entries, path)
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, err
 	}
-	sort.Strings(paths)
+	sort.Strings(entries)
 
-	var buf bytes.Buffer
-	gw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	// 2) Prepare gzip+tar writers
+	buf := &bytes.Buffer{}
+	gw, err := gzip.NewWriterLevel(buf, gzip.BestCompression)
 	if err != nil {
 		return nil, err
 	}
-	// Fix timestamp
+	// Fix gzip header for determinism
 	gw.Header.ModTime = time.Unix(0, 0)
-	// Optionally clear OS/Name
 	gw.Header.OS = 0
-	tw := tar.NewWriter(gw)
 
-	for _, path := range paths {
+	tw := tar.NewWriter(gw)
+	defer func() {
+		if tcErr := tw.Close(); tcErr != nil {
+			Log.Warnf("tar.Close: %v", tcErr)
+		}
+		if gcErr := gw.Close(); gcErr != nil {
+			Log.Warnf("gzip.Close: %v", gcErr)
+		}
+	}()
+
+	// 3) Stream through each entry exactly once
+	for _, path := range entries {
 		info, err := os.Lstat(path)
 		if err != nil {
 			return nil, err
 		}
-
-		rel, err := filepath.Rel(filepath.Dir(fsDir), path)
+		rel, err := filepath.Rel(fsDir, path)
 		if err != nil {
 			return nil, err
 		}
-		tarName := filepath.ToSlash(filepath.Join(prefixPath, rel))
 
+		// Compute tar header name
+		var tarName string
+		if rel == "." {
+			tarName = prefixPath
+		} else {
+			tarName = filepath.ToSlash(filepath.Join(prefixPath, rel))
+		}
+
+		// Create deterministic tar header
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
 			return nil, err
 		}
 		hdr.Name = tarName
-		// Remove UID/GID for determinism
 		hdr.Uid = 0
 		hdr.Gid = 0
+		hdr.Uname = ""
+		hdr.Gname = ""
+		hdr.ModTime = time.Unix(0, 0)
 
 		if err := tw.WriteHeader(hdr); err != nil {
 			return nil, err
 		}
 
+		// If it's a regular file, copy its contents
 		if info.Mode().IsRegular() {
 			f, err := os.Open(path)
 			if err != nil {
 				return nil, err
 			}
-			_, err = io.Copy(tw, f)
-			f.Close()
-			if err != nil {
-				return nil, err
+			_, copyErr := io.Copy(tw, f)
+			closeErr := f.Close()
+			// 일단 copyErr 가 발생하면 리턴한다. 그 후에 만약 또 다시 closeErr 가 발생한다면 이후 리턴된다.
+			if copyErr != nil {
+				return nil, fmt.Errorf("failed to copy file %q: %w", path, copyErr)
+			}
+			if closeErr != nil {
+				return nil, fmt.Errorf("failed to close file %q: %w", path, closeErr)
 			}
 		}
 	}
-	tw.Close()
-	gw.Close()
 
 	return buf.Bytes(), nil
 }

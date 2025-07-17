@@ -1,0 +1,15 @@
+{
+  "referenceName": "GRCh38",
+  "organism": "Homo sapiens",
+  "sequenceCount": 24,
+  "totalBaseCount": 3200456742,
+  "format": "FASTA.GZ",
+  "compression": "gzip",
+  "lineWrap": 60,
+  "created": "2025-07-15T19:30:00Z",
+  "pipelineVersion": "v2.3.1",
+  "checksum": "sha256:abcdef1234567890…",
+  "checksumAlgorithm": "sha256",
+  "description": "Primary tumor WGS FASTA, trimmed and filtered",
+  "notes": "Adapters removed with Trimmomatic v0.39; low-quality bases (<Q20) filtered"
+}

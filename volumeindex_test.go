@@ -2,16 +2,13 @@ package sori
 
 import (
 	"context"
-	"encoding/json"
 	"github.com/stretchr/testify/assert"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
 func TestGenerateAndSaveVolumeIndex(t *testing.T) {
 	// JSON 생성
-	vi, err := GenerateVolumeIndex("../test-vol", "TestVol")
+	vi, err := GenerateVolumeIndex("./test-vol", "TestVol")
 	if err != nil {
 		t.Fatalf("GenerateVolumeIndex failed: %v", err)
 	}
@@ -22,20 +19,51 @@ func TestGenerateAndSaveVolumeIndex(t *testing.T) {
 	}
 }
 
-func TestPublishVolumeAsOCI(t *testing.T) {
+func TestPublishVolume(t *testing.T) {
 
-	volDir := "../test-vol"
-	indexPath := filepath.Join(volDir, "volume-index.json")
+	volDir := "./test-vol"
+	vi, err := GenerateVolumeIndex(volDir, "테스트 하는 볼륨")
+	if err != nil {
+		t.Fatalf("GenerateVolumeIndex failed: %v", err)
+	}
+	configblob, err := loadMetadataJSON("configblob.json")
+	if err != nil {
+		t.Fatalf(" failed to load configblob juson:%v", err)
+	}
 
-	raw, err := os.ReadFile(indexPath)
+	_, err = vi.PublishVolume(context.Background(), volDir, "test.v1.0.0", configblob)
 	assert.NoError(t, err)
-	var loaded VolumeIndex
-	err = json.Unmarshal(raw, &loaded)
-	assert.NoError(t, err)
-	assert.Equal(t, "TestVol", loaded.DisplayName)
+}
 
-	ociRepo := "../repo"
-	_, err = PublishVolumeAsOCI(context.Background(), volDir, indexPath, ociRepo, "v1.0.0")
+func TestPublishVolumeOther(t *testing.T) {
+
+	volDir := "./test2"
+	vi, err := GenerateVolumeIndex(volDir, "테스트 하는 볼륨2")
+	if err != nil {
+		t.Fatalf("GenerateVolumeIndex failed: %v", err)
+	}
+	configblob, err := loadMetadataJSON("configblob1.json")
+	if err != nil {
+		t.Fatalf(" failed to load configblob juson:%v", err)
+	}
+
+	_, err = vi.PublishVolume(context.Background(), volDir, "test2.v1.0.0", configblob)
+	assert.NoError(t, err)
+}
+
+func TestPublishVolumeOther1(t *testing.T) {
+	// 동일한 것을 넣으면 어떻게 될까?
+	volDir := "./test2"
+	vi, err := GenerateVolumeIndex(volDir, "테스트 하는 볼륨2")
+	if err != nil {
+		t.Fatalf("GenerateVolumeIndex failed: %v", err)
+	}
+	configblob, err := loadMetadataJSON("configblob1.json")
+	if err != nil {
+		t.Fatalf(" failed to load configblob juson:%v", err)
+	}
+
+	_, err = vi.PublishVolume(context.Background(), volDir, "test2.v1.0.0", configblob)
 	assert.NoError(t, err)
 }
 
@@ -46,8 +74,8 @@ func TestPublishVolumeAsOCI(t *testing.T) {
 func TestFetchVolumeFromOCI(t *testing.T) {
 	ctx := context.Background()
 
-	repo := "../repo"
-	dest := "../test-vol-restored"
+	repo := "./repo"
+	dest := "./test-vol-restored"
 	_, err := FetchVolumeFromOCI(ctx, dest, repo, "v1.0.0")
 	if err != nil {
 		t.Fatalf("FetchVolumeFromOCI failed: %v", err)
@@ -63,7 +91,7 @@ func TestPushLocalToRemote_Harbor(t *testing.T) {
 	remoteRepo := "harbor.local/demo-project/testrepo"
 	user := "admin"
 	pass := "Harbor12345"
-	repo := "../repo"
+	repo := "./repo"
 
 	// 5) 실제 푸시 호출
 	if err := PushLocalToRemote(ctx, repo, localTag, remoteRepo, user, pass, true); err != nil {
