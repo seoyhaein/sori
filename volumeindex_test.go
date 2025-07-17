@@ -19,7 +19,7 @@ func TestGenerateAndSaveVolumeIndex(t *testing.T) {
 	}
 
 	// 파일로 저장
-	if err := vi.SaveToFile("../test-vol"); err != nil {
+	if err := vi.SaveToFile("./test-vol"); err != nil {
 		t.Fatalf("SaveToFile failed: %v", err)
 	}
 }
@@ -74,7 +74,8 @@ func TestPublishVolumeOther1(t *testing.T) {
 
 func TestTarGzDirDeterministic(t *testing.T) {
 	tPath := "./test-vol"
-	data1, err := tarGzDirDeterministic(tPath, "test-vol1")
+	// 두번째 메서드는 풀리는 폴더 이름이라고 보면 됨.
+	data1, err := TarGzDir(tPath, "test-vol1")
 	if err != nil {
 		t.Fatalf("tarGzDirDeterministic failed: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestFetchVolumeFromOCI(t *testing.T) {
 func TestPushLocalToRemote_Harbor(t *testing.T) {
 	ctx := context.Background()
 
-	localTag := "v1.0.0"
+	localTag := "test.v1.0.0"
 	remoteRepo := "harbor.local/demo-project/testrepo"
 	user := "admin"
 	pass := "Harbor12345"
@@ -247,7 +248,7 @@ func TestExtractTarGz(t *testing.T) {
 
 	// 2) Extract into a temp directory
 	dest := t.TempDir()
-	err = extractTarGz(bytes.NewReader(buf.Bytes()), dest)
+	err = UntarGzDir(bytes.NewReader(buf.Bytes()), dest)
 	assert.NoError(t, err)
 
 	// 3) Verify directory was created

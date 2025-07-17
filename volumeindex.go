@@ -354,7 +354,7 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 
 // TODO 메서드 바뀔 수 있음. 일단 이렇게 해둠. 서비스 방식에 따라 달라질 수 있음.
 
-// NewVolumeCollection 생성 시 초기 Version을 1 로 설정
+// NewVolumeCollection 생성 시 초기 Version 을 1 로 설정
 func NewVolumeCollection(initialVolumes ...VolumeIndex) *VolumeCollection {
 	coll := &VolumeCollection{
 		Version: 1,
@@ -364,7 +364,7 @@ func NewVolumeCollection(initialVolumes ...VolumeIndex) *VolumeCollection {
 	return coll
 }
 
-// AddVolume Volumes에 새 Volume을 append하고 Version  +1
+// AddVolume Volumes 에 새 Volume 을 append 하고 Version  +1
 func (c *VolumeCollection) AddVolume(v VolumeIndex) {
 	c.Volumes = append(c.Volumes, v)
 	c.Version++
@@ -381,6 +381,7 @@ func (c *VolumeCollection) RemoveVolume(idx int) error {
 }
 
 // PushLocalToRemote 일단 localRepoPath 를 직접 입력 받도록 했다. plainHTTP = true, 이면 http, false 이면 https 적용된다. 디폴트는 https 이다.
+// TODO 푸쉬 실패와 에러는 구분해주자. 즉, 로컬에 없어서 푸쉬 실패할때도 에러로 처리하는데 이건 구분해저야 할듯.
 func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user, pass string, plainHTTP bool) error {
 	// 1) Initialize local OCI store
 	srcStore, err := oci.New(localRepoPath)
@@ -404,7 +405,7 @@ func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user
 		Cache:      auth.NewCache(),
 		Credential: auth.StaticCredential(repo.Reference.Registry, auth.Credential{Username: user, Password: pass}),
 	}
-
+	// TODO 여기서 local 에 tag 이름으로 있는지 확인해야 할듯하다. 없으면 copy 않하도록 구분 지어주는 방향으로 가자.
 	// 4) Perform copy: local(tag) -> remote(tag)
 	pushedDesc, err := oras.Copy(ctx, srcStore, tag, repo, tag, oras.DefaultCopyOptions)
 	if err != nil {
