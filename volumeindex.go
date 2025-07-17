@@ -185,7 +185,7 @@ func (vi *VolumeIndex) SaveToFile(rootPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal volume index: %w", err)
 	}
-	if err := os.WriteFile(outFile, data, 0644); err != nil {
+	if err := os.WriteFile(outFile, data, 0o644); err != nil {
 		return fmt.Errorf("failed to write file %s: %w", outFile, err)
 	}
 	return nil
@@ -229,6 +229,7 @@ func loadMetadataJSON(path string) ([]byte, error) {
 // TODO 별도의 MediaType 을 설정할지 고민하자. 지금은 현재 image 를 차용해서 사용하고 있다.
 
 // PublishVolume GenerateVolumeIndex 에서 생성된 VolumeIndex 를 받아 OCI 스토어에 올리고, 업데이트된 VolumeIndex 를 리턴한다. volName 은 tag 까지 포함한다.
+// TODO wraper method 를 하나 더 두어서 OCIStore 이렇게 처리 하지 말고, 입력받도록 처리하는 메서드를 하나 더 두어서 다양항하게 접근하자. <- 이건 생각해보자.
 func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
 	// 1) Init OCI store
 	store, err := oci.New(OCIStore)
@@ -379,6 +380,7 @@ func (c *VolumeCollection) RemoveVolume(idx int) error {
 	return nil
 }
 
+// PushLocalToRemote 일단 localRepoPath 를 직접 입력 받도록 했다. plainHTTP = true, 이면 http, false 이면 https 적용된다. 디폴트는 https 이다.
 func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user, pass string, plainHTTP bool) error {
 	// 1) Initialize local OCI store
 	srcStore, err := oci.New(localRepoPath)
@@ -416,7 +418,7 @@ func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user
 // TODO 버그 있고 병렬적으로 가져오도록 해야 한다. 이건 테스트 진행해야 한다.
 
 // FetchVolumeFromOCI 은 repo:tag 로 푸시된 볼륨 아티팩트를 destRoot 아래에 풀고,
-// 재구성된 VolumeIndex 를 반환함. TODO 수정해줘야 함.
+// 재구성된 VolumeIndex 를 반환함. TODO 수정해줘야 함. 다음에는 이것부터 하자.
 func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) (*VolumeIndex, error) {
 	// 1) OCI 스토어 열기
 	store, err := oci.New(repo)
@@ -460,7 +462,7 @@ func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) 
 		// 원래 파티션 경로는 레이어 어노테이션에 저장돼 있다고 가정
 		partPath := layerDesc.Annotations["org.example.partitionPath"]
 		targetDir := filepath.Join(destRoot, partPath)
-		if err := os.MkdirAll(targetDir, 0755); err != nil {
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
 			return nil, fmt.Errorf("디렉터리 생성 실패 %s: %w", targetDir, err)
 		}
 
@@ -485,7 +487,7 @@ func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) 
 	if err := os.WriteFile(
 		filepath.Join(destRoot, "volume-index.json"),
 		indexBytes,
-		0644,
+		0o644,
 	); err != nil {
 		return nil, fmt.Errorf("volume-index.json 쓰기 실패: %w", err)
 	}
@@ -527,7 +529,7 @@ func UntarGzDir(gzipStream io.Reader, dest string) error {
 		case tar.TypeReg, tar.TypeRegA:
 			// Ensure parent directory exists
 			parentDir := filepath.Dir(target)
-			if err := os.MkdirAll(parentDir, 0755); err != nil {
+			if err := os.MkdirAll(parentDir, 0o755); err != nil {
 				return fmt.Errorf("mkdir parent %q: %w", parentDir, err)
 			}
 			// Create or truncate file with correct permissions
@@ -548,7 +550,7 @@ func UntarGzDir(gzipStream io.Reader, dest string) error {
 		case tar.TypeSymlink:
 			// Ensure parent directory exists
 			parentDir := filepath.Dir(target)
-			if err := os.MkdirAll(parentDir, 0755); err != nil {
+			if err := os.MkdirAll(parentDir, 0o755); err != nil {
 				return fmt.Errorf("mkdir parent for symlink %q: %w", parentDir, err)
 			}
 			if err := os.Symlink(hdr.Linkname, target); err != nil {
