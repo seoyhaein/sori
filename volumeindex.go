@@ -275,7 +275,7 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 
 	if len(vi.Partitions) == 0 {
 		// fallback: whole volPath as one layer
-		layerData, err := tarGzDirDeterministic(volPath, rootBase)
+		layerData, err := TarGzDir(volPath, rootBase)
 		if err != nil {
 			return nil, fmt.Errorf("tar.gz fallback %q: %w", volPath, err)
 		}
@@ -296,7 +296,7 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 		for i := range vi.Partitions {
 			part := &vi.Partitions[i]
 			fsPath := filepath.Join(volPath, strings.TrimPrefix(part.Path, rootBase+"/"))
-			layerData, err := tarGzDirDeterministic(fsPath, part.Path)
+			layerData, err := TarGzDir(fsPath, part.Path)
 			if err != nil {
 				return nil, fmt.Errorf("tar.gz %q: %w", fsPath, err)
 			}
@@ -465,7 +465,7 @@ func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) 
 		}
 
 		// 압축 해제
-		if err := extractTarGz(rc, targetDir); err != nil {
+		if err := UntarGzDir(rc, targetDir); err != nil {
 			return nil, fmt.Errorf("레이어 압축 해제 실패 %s: %w", layerDesc.Digest, err)
 		}
 
@@ -493,8 +493,8 @@ func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) 
 	return vi, nil
 }
 
-// extractTarGz 는 gzip 스트림을 해제하여 dest 디렉터리에 tar 파일 내용을 풀어 준다. TODO filepath.clean 이거 다른 코드에도 적용해야 함. close 에러 처리 해야함. (시간날때 처리하자)
-func extractTarGz(gzipStream io.Reader, dest string) error {
+// UntarGzDir 는 gzip 스트림을 해제하여 dest 디렉터리에 tar 파일 내용을 풀어 준다. TODO filepath.clean 이거 다른 코드에도 적용해야 함. close 에러 처리 해야함. (시간날때 처리하자)
+func UntarGzDir(gzipStream io.Reader, dest string) error {
 	// Initialize gzip reader
 	gz, err := gzip.NewReader(gzipStream)
 	if err != nil {
@@ -563,8 +563,8 @@ func extractTarGz(gzipStream io.Reader, dest string) error {
 	return nil
 }
 
-// tarGzDirDeterministic 입력값이 변하지 않는다면 sha 를 고정적으로 만들어주면서 압축된 tarball 만들어줌.
-func tarGzDirDeterministic(fsDir, prefixPath string) ([]byte, error) {
+// TarGzDir 입력값이 변하지 않는다면 sha 를 고정적으로 만들어주면서 압축된 tarball 만들어줌.
+func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
 	// 1) Collect all paths under fsDir
 	var entries []string
 	if err := filepath.WalkDir(fsDir, func(path string, d fs.DirEntry, err error) error {
