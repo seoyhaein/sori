@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -235,20 +236,23 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 		return nil, fmt.Errorf("init OCI store: %w", err)
 	}
 
-	// helper: descriptor 가 없으면 push
-	pushIfNeeded := func(desc ocispec.Descriptor, r io.Reader) error {
+	anyPushed := false
+	// helper: push blob if not exists, returns pointer to bool pushed
+	pushIfNeeded := func(desc ocispec.Descriptor, r io.Reader) (*bool, error) {
 		exists, err := store.Exists(ctx, desc)
 		if err != nil {
-			return fmt.Errorf("check exists (%s): %w", desc.Digest, err)
+			return nil, fmt.Errorf("check exists (%s): %w", desc.Digest, err)
 		}
 		if exists {
-			Log.Info("Blob already exists, skipping push: ", desc.Digest)
-			return nil
+			Log.Infof("blob %s already exists, skipping", desc.Digest)
+			skipped := false
+			return &skipped, nil
 		}
 		if err := store.Push(ctx, desc, r); err != nil {
-			return fmt.Errorf("push blob (%s): %w", desc.Digest, err)
+			return nil, fmt.Errorf("push blob (%s): %w", desc.Digest, err)
 		}
-		return nil
+		pushed := true
+		return &pushed, nil
 	}
 
 	// 2) Push config blob
@@ -257,16 +261,20 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 		Digest:    digest.FromBytes(configBlob),
 		Size:      int64(len(configBlob)),
 	}
-	if err := pushIfNeeded(configDesc, bytes.NewReader(configBlob)); err != nil {
+	pushedPtr, err := pushIfNeeded(configDesc, bytes.NewReader(configBlob))
+	if err != nil {
 		return nil, err
 	}
+	if pushedPtr != nil && *pushedPtr {
+		anyPushed = true
+	}
 
-	// 3) Pack and push each layer
+	// 3) Pack and push layers
 	rootBase := filepath.Base(volPath)
 	layers := make([]ocispec.Descriptor, 0, len(vi.Partitions))
 
 	if len(vi.Partitions) == 0 {
-		// 파티션 정보가 없으면 volPath 전체를 한 레이어로 묶어서 처리
+		// fallback: whole volPath as one layer
 		layerData, err := tarGzDirDeterministic(volPath, rootBase)
 		if err != nil {
 			return nil, fmt.Errorf("tar.gz fallback %q: %w", volPath, err)
@@ -276,35 +284,51 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 			Digest:    digest.FromBytes(layerData),
 			Size:      int64(len(layerData)),
 		}
-		if err := pushIfNeeded(desc, bytes.NewReader(layerData)); err != nil {
+		pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
+		if err != nil {
 			return nil, fmt.Errorf("push fallback layer: %w", err)
+		}
+		if pushedPtr != nil && *pushedPtr {
+			anyPushed = true
 		}
 		layers = append(layers, desc)
 	} else {
 		for i := range vi.Partitions {
 			part := &vi.Partitions[i]
 			fsPath := filepath.Join(volPath, strings.TrimPrefix(part.Path, rootBase+"/"))
-
 			layerData, err := tarGzDirDeterministic(fsPath, part.Path)
 			if err != nil {
 				return nil, fmt.Errorf("tar.gz %q: %w", fsPath, err)
 			}
-
 			desc := ocispec.Descriptor{
 				MediaType: ocispec.MediaTypeImageLayerGzip,
 				Digest:    digest.FromBytes(layerData),
 				Size:      int64(len(layerData)),
 			}
-			if err := pushIfNeeded(desc, bytes.NewReader(layerData)); err != nil {
+			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
+			if err != nil {
 				return nil, fmt.Errorf("push layer %s: %w", part.Name, err)
 			}
-
+			if pushedPtr != nil && *pushedPtr {
+				anyPushed = true
+			}
 			part.ManifestRef = desc.Digest.String()
 			layers = append(layers, desc)
 		}
 	}
 
-	// 4) Create & tag manifest
+	// If nothing changed, skip manifest update
+	if !anyPushed {
+		existingDesc, err := store.Resolve(ctx, volName)
+		if err == nil {
+			Log.Infof("No changes detected (config+layers), skipping manifest update for %q", volName)
+			vi.VolumeRef = existingDesc.Digest.String()
+			return vi, nil
+		}
+		// If resolve failed (e.g., not found), continue to create manifest
+	}
+
+	// 4) Create & tag new manifest
 	manifestDesc, err := oras.PackManifest(ctx, store, oras.PackManifestVersion1_1,
 		ocispec.MediaTypeImageManifest,
 		oras.PackManifestOptions{
@@ -318,14 +342,12 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 	if err != nil {
 		return nil, fmt.Errorf("pack manifest: %w", err)
 	}
-
-	vi.VolumeRef = manifestDesc.Digest.String()
 	if err := store.Tag(ctx, manifestDesc, volName); err != nil {
 		return nil, fmt.Errorf("tag manifest %q: %w", volName, err)
 	}
+	vi.VolumeRef = manifestDesc.Digest.String()
 
-	// 5) 결과 반환 (파일 쓰기는 호출자에게)
-	Log.Infof("Volume artifact %s saved\n", volName)
+	Log.Infof("Volume artifact %s tagged as %s", volName, manifestDesc.Digest)
 	return vi, nil
 }
 
@@ -471,43 +493,71 @@ func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) 
 	return vi, nil
 }
 
-// extractTarGz 는 gzip 스트림을 해제하여 dest 디렉터리에 tar 파일 내용을 풀어 줍니다.
+// extractTarGz 는 gzip 스트림을 해제하여 dest 디렉터리에 tar 파일 내용을 풀어 준다. TODO filepath.clean 이거 다른 코드에도 적용해야 함. close 에러 처리 해야함. (시간날때 처리하자)
 func extractTarGz(gzipStream io.Reader, dest string) error {
+	// Initialize gzip reader
 	gz, err := gzip.NewReader(gzipStream)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating gzip reader: %w", err)
 	}
 	defer gz.Close()
 
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
-			break // 아카이브 끝
-		} else if err != nil {
-			return err
+		if errors.Is(err, io.EOF) {
+			break // end of archive
+		}
+		if err != nil {
+			return fmt.Errorf("reading tar entry: %w", err)
 		}
 
-		target := filepath.Join(dest, hdr.Name)
+		// Clean entry name and build target path
+		entry := filepath.Clean(hdr.Name)
+		target := filepath.Join(dest, entry)
+		mode := hdr.FileInfo().Mode()
+
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)); err != nil {
-				return err
+			// Create directory with permissions
+			if err := os.MkdirAll(target, mode.Perm()); err != nil {
+				return fmt.Errorf("mkdir %q: %w", target, err)
 			}
-		case tar.TypeReg:
-			f, err := os.OpenFile(
-				target,
-				os.O_CREATE|os.O_WRONLY,
-				os.FileMode(hdr.Mode),
-			)
+
+		case tar.TypeReg, tar.TypeRegA:
+			// Ensure parent directory exists
+			parentDir := filepath.Dir(target)
+			if err := os.MkdirAll(parentDir, 0755); err != nil {
+				return fmt.Errorf("mkdir parent %q: %w", parentDir, err)
+			}
+			// Create or truncate file with correct permissions
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
 			if err != nil {
-				return err
+				return fmt.Errorf("open file %q: %w", target, err)
 			}
+			// Copy file contents
 			if _, err := io.Copy(f, tr); err != nil {
 				f.Close()
-				return err
+				return fmt.Errorf("copy file %q: %w", target, err)
 			}
-			f.Close()
+			// Close and restore permission
+			if err := f.Close(); err != nil {
+				return fmt.Errorf("close file %q: %w", target, err)
+			}
+
+		case tar.TypeSymlink:
+			// Ensure parent directory exists
+			parentDir := filepath.Dir(target)
+			if err := os.MkdirAll(parentDir, 0755); err != nil {
+				return fmt.Errorf("mkdir parent for symlink %q: %w", parentDir, err)
+			}
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return fmt.Errorf("symlink %q -> %q: %w", target, hdr.Linkname, err)
+			}
+
+		default:
+			// Skip other file types (hard links, devices, etc.)
+			continue
 		}
 	}
 	return nil
@@ -515,7 +565,7 @@ func extractTarGz(gzipStream io.Reader, dest string) error {
 
 // tarGzDirDeterministic 입력값이 변하지 않는다면 sha 를 고정적으로 만들어주면서 압축된 tarball 만들어줌.
 func tarGzDirDeterministic(fsDir, prefixPath string) ([]byte, error) {
-	// 1) Collect all paths
+	// 1) Collect all paths under fsDir
 	var entries []string
 	if err := filepath.WalkDir(fsDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -528,7 +578,7 @@ func tarGzDirDeterministic(fsDir, prefixPath string) ([]byte, error) {
 	}
 	sort.Strings(entries)
 
-	// 2) Prepare gzip+tar writers
+	// 2) Prepare gzip + tar writers
 	buf := &bytes.Buffer{}
 	gw, err := gzip.NewWriterLevel(buf, gzip.BestCompression)
 	if err != nil {
@@ -539,16 +589,8 @@ func tarGzDirDeterministic(fsDir, prefixPath string) ([]byte, error) {
 	gw.Header.OS = 0
 
 	tw := tar.NewWriter(gw)
-	defer func() {
-		if tcErr := tw.Close(); tcErr != nil {
-			Log.Warnf("tar.Close: %v", tcErr)
-		}
-		if gcErr := gw.Close(); gcErr != nil {
-			Log.Warnf("gzip.Close: %v", gcErr)
-		}
-	}()
 
-	// 3) Stream through each entry exactly once
+	// 3) Stream each entry exactly once
 	for _, path := range entries {
 		info, err := os.Lstat(path)
 		if err != nil {
@@ -559,7 +601,7 @@ func tarGzDirDeterministic(fsDir, prefixPath string) ([]byte, error) {
 			return nil, err
 		}
 
-		// Compute tar header name
+		// Compute the name to use inside the tar archive
 		var tarName string
 		if rel == "." {
 			tarName = prefixPath
@@ -567,7 +609,7 @@ func tarGzDirDeterministic(fsDir, prefixPath string) ([]byte, error) {
 			tarName = filepath.ToSlash(filepath.Join(prefixPath, rel))
 		}
 
-		// Create deterministic tar header
+		// Create a deterministic header
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
 			return nil, err
@@ -583,23 +625,33 @@ func tarGzDirDeterministic(fsDir, prefixPath string) ([]byte, error) {
 			return nil, err
 		}
 
-		// If it's a regular file, copy its contents
+		// If it's a regular file, copy its contents into the tar
 		if info.Mode().IsRegular() {
 			f, err := os.Open(path)
 			if err != nil {
 				return nil, err
 			}
-			_, copyErr := io.Copy(tw, f)
-			closeErr := f.Close()
-			// 일단 copyErr 가 발생하면 리턴한다. 그 후에 만약 또 다시 closeErr 가 발생한다면 이후 리턴된다.
-			if copyErr != nil {
-				return nil, fmt.Errorf("failed to copy file %q: %w", path, copyErr)
+			if _, err := io.Copy(tw, f); err != nil {
+				cErr := f.Close()
+				if cErr != nil {
+					return nil, fmt.Errorf("failed to copy file %q: %w and file close error :%w", path, err, cErr)
+				}
+				return nil, fmt.Errorf("failed to copy file %q: %w", path, err)
 			}
-			if closeErr != nil {
-				return nil, fmt.Errorf("failed to close file %q: %w", path, closeErr)
+			if err := f.Close(); err != nil {
+				return nil, fmt.Errorf("failed to close file %q: %w", path, err)
 			}
 		}
 	}
 
+	// 4) Explicitly close writers to flush footers
+	if err := tw.Close(); err != nil {
+		return nil, fmt.Errorf("tar.Close failed: %w", err)
+	}
+	if err := gw.Close(); err != nil {
+		return nil, fmt.Errorf("gzip.Close failed: %w", err)
+	}
+
+	// 5) Now buf contains a complete, deterministic .tar.gz
 	return buf.Bytes(), nil
 }
