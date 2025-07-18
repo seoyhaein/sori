@@ -32,8 +32,6 @@ type Partition struct {
 	Compression string `json:"compression"`
 }
 
-// TODO annotation 은 config blob 으로 빠짐. 사용자에게 json 을 만들도록 해주었음. 따로 필드를 만들어주지 않음. 한번 생각해보자. 이방법이 더 나을듯한데.
-
 type VolumeIndex struct {
 	VolumeRef   string      `json:"volume_ref"`
 	DisplayName string      `json:"display_name"`
@@ -52,21 +50,103 @@ type VolumeCollection struct {
 const CollectionFileName = "volume-collection.json"
 const OCIStore = "./repo"
 
-// loadCollection: rootDir/volume-collection.json 이 있으면 언마샬, 없으면 빈 컬렉션 반환
-func loadCollection(rootDir string) (VolumeCollection, error) {
-	var coll VolumeCollection
+// TODO 정책을 정해야 하는데 일단, rootDir 안에 볼륨 폴더들이 있는 것이 원칙이다. 하지만 그렇게 하지 않다도 되게 일단 만들어 놓는다.
+// TODO 그리고 볼륨 폴더에 는 volume-index.json 이 있어야 한다. 위치는 볼륨 폴더의 루트 위치에 있어야 한다. 그것들을 읽어서 VolumeCollection 을 만들어 주는 방식으로 간다.
+// TODO 이러한 내용은 사용자가 알아도 되지만 몰라도 된다. 이렇게 메서드들이 만들어 주는 방식으로 간다. 사용자 편의성을 위해서 사용자의 입력을 최소한으로 진행한다. <- 이렇게 하면, 메서드도 정리 해야 할 듯한데. 이건 생각해보자.
+
+// LoadOrNewCollection rootDir/volume-collection.json 이 있으면 언마샬, 없으면 초기화 시킴.
+// 만약 아무것도 없다면 그냥 LoadOrNewCollection("") 이렇게 사용하면 됨.
+func LoadOrNewCollection(rootDir string, initialVolumes ...VolumeIndex) (*VolumeCollection, error) {
+	// 1) 컬렉션 파일 경로 준비
 	path := filepath.Join(rootDir, CollectionFileName)
+
+	// 2) 기존 파일 읽기 시도
 	data, err := os.ReadFile(path)
 	if err != nil {
+		// 2-1) 파일이 없으면 새 컬렉션 생성 + 저장
 		if os.IsNotExist(err) {
+			coll := NewVolumeCollection(initialVolumes...)
+			if err := saveCollection(rootDir, *coll); err != nil {
+				return nil, fmt.Errorf("failed to save new collection: %w", err)
+			}
 			return coll, nil
 		}
-		return coll, err
+		// 2-2) 그 외 I/O 에러
+		return nil, fmt.Errorf("read collection file: %w", err)
 	}
+
+	// 3) 파일이 존재하면 JSON 언마샬
+	var coll VolumeCollection
 	if err := json.Unmarshal(data, &coll); err != nil {
-		return coll, err
+		return nil, fmt.Errorf("unmarshal collection JSON: %w", err)
 	}
-	return coll, nil
+	return &coll, nil
+}
+
+// NewVolumeCollection 생성 시 초기 Version 을 1 로 설정
+func NewVolumeCollection(initialVolumes ...VolumeIndex) *VolumeCollection {
+	coll := &VolumeCollection{
+		Version: 1,
+		Volumes: make([]VolumeIndex, len(initialVolumes)),
+	}
+	copy(coll.Volumes, initialVolumes)
+	return coll
+}
+
+// loadMetadataJSON (위의) 임의의 json 파일을 읽어와서 []byte 로 변환, -> config blob 으로 채워짐.
+func loadMetadataJSON(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read JSON file %s: %w", path, err)
+	}
+	// 선택적으로 JSON 유효성 검사
+	var tmp interface{}
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return nil, fmt.Errorf("invalid JSON in %s: %w", path, err)
+	}
+	return data, nil
+}
+
+// HasVolume VolumeCollection 에 추가할 인덱스가 이미 들어있는지 검사합니다.
+func (vc *VolumeCollection) HasVolume(vi VolumeIndex) bool {
+	for _, existing := range vc.Volumes {
+		// DisplayName 또는 VolumeRef 중 하나라도 같으면 이미 존재한 것으로 간주
+		if existing.DisplayName == vi.DisplayName || existing.VolumeRef == vi.VolumeRef {
+			return true
+		}
+	}
+	return false
+}
+
+// Merge 새 컬렉션을 기존 컬렉션에 병합, 중복되지 않은 VolumeIndex 만 추가, 하나라도 추가되면 Version 을 +1 하고 true 를 리턴, 아무것도 추가되지 않으면 false 를 리턴
+func (vc *VolumeCollection) Merge(newColl VolumeCollection) bool {
+	added := false
+	for _, vi := range newColl.Volumes {
+		if !vc.HasVolume(vi) {
+			vc.Volumes = append(vc.Volumes, vi)
+			added = true
+		}
+	}
+	if added {
+		vc.Version++
+	}
+	return added
+}
+
+// AddVolume Volumes 에 새 Volume 을 append 하고 Version  +1
+func (vc *VolumeCollection) AddVolume(v VolumeIndex) {
+	vc.Volumes = append(vc.Volumes, v)
+	vc.Version++
+}
+
+// RemoveVolume 인덱스 위치의 Volume 을 삭제하고 Version +1
+func (vc *VolumeCollection) RemoveVolume(idx int) error {
+	if idx < 0 || idx >= len(vc.Volumes) {
+		return fmt.Errorf("index %d out of range", idx)
+	}
+	vc.Volumes = append(vc.Volumes[:idx], vc.Volumes[idx+1:]...)
+	vc.Version++
+	return nil
 }
 
 // saveCollection: coll 을 rootDir/volume-collection.json 에 저장
@@ -77,37 +157,6 @@ func saveCollection(rootDir string, coll VolumeCollection) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
-}
-
-// HasVolume VolumeCollection 에 추가할 인덱스가 이미 들어있는지 검사합니다.
-func (c *VolumeCollection) HasVolume(vi VolumeIndex) bool {
-	for _, existing := range c.Volumes {
-		// DisplayName 또는 VolumeRef 중 하나라도 같으면 이미 존재한 것으로 간주
-		if existing.DisplayName == vi.DisplayName || existing.VolumeRef == vi.VolumeRef {
-			return true
-		}
-	}
-	return false
-}
-
-// Merge 새 컬렉션을 기존 컬렉션에 병합합니다.
-//   - 중복되지 않은 VolumeIndex만 추가
-//   - 하나라도 추가되면 Version을 +1 하고 true를 리턴
-//   - 아무것도 추가되지 않으면 false를 리턴
-func (c *VolumeCollection) Merge(newColl VolumeCollection) bool {
-	added := false
-
-	for _, vi := range newColl.Volumes {
-		if !c.HasVolume(vi) {
-			c.Volumes = append(c.Volumes, vi)
-			added = true
-		}
-	}
-
-	if added {
-		c.Version++
-	}
-	return added
 }
 
 // TODO volume-index.json 이거 받도록 해주고, 이거 제외해줘야 한다. 다른 폴더에 저장하던가.
@@ -211,20 +260,6 @@ func (vi *VolumeIndex) SaveToFile(rootPath string) error {
   "notes": "Adapters removed with Trimmomatic v0.39; low-quality bases (<Q20) filtered"
 }
 */
-
-// loadMetadataJSON (위의) 임의의 json 파일을 읽어와서 []byte 로 변환, -> config blob 으로 채워짐.
-func loadMetadataJSON(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read JSON file %s: %w", path, err)
-	}
-	// 선택적으로 JSON 유효성 검사
-	var tmp interface{}
-	if err := json.Unmarshal(data, &tmp); err != nil {
-		return nil, fmt.Errorf("invalid JSON in %s: %w", path, err)
-	}
-	return data, nil
-}
 
 // TODO 별도의 MediaType 을 설정할지 고민하자. 지금은 현재 image 를 차용해서 사용하고 있다.
 
@@ -352,34 +387,6 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 	return vi, nil
 }
 
-// TODO 메서드 바뀔 수 있음. 일단 이렇게 해둠. 서비스 방식에 따라 달라질 수 있음.
-
-// NewVolumeCollection 생성 시 초기 Version 을 1 로 설정
-func NewVolumeCollection(initialVolumes ...VolumeIndex) *VolumeCollection {
-	coll := &VolumeCollection{
-		Version: 1,
-		Volumes: make([]VolumeIndex, len(initialVolumes)),
-	}
-	copy(coll.Volumes, initialVolumes)
-	return coll
-}
-
-// AddVolume Volumes 에 새 Volume 을 append 하고 Version  +1
-func (c *VolumeCollection) AddVolume(v VolumeIndex) {
-	c.Volumes = append(c.Volumes, v)
-	c.Version++
-}
-
-// RemoveVolume 인덱스 위치의 Volume 을 삭제하고 Version +1
-func (c *VolumeCollection) RemoveVolume(idx int) error {
-	if idx < 0 || idx >= len(c.Volumes) {
-		return fmt.Errorf("index %d out of range", idx)
-	}
-	c.Volumes = append(c.Volumes[:idx], c.Volumes[idx+1:]...)
-	c.Version++
-	return nil
-}
-
 // PushLocalToRemote 일단 localRepoPath 를 직접 입력 받도록 했다. plainHTTP = true, 이면 http, false 이면 https 적용된다. 디폴트는 https 이다.
 // TODO 푸쉬 실패와 에러는 구분해주자. 즉, 로컬에 없어서 푸쉬 실패할때도 에러로 처리하는데 이건 구분해저야 할듯.
 func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user, pass string, plainHTTP bool) error {
@@ -420,59 +427,56 @@ func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user
 
 // FetchVolumeFromOCI 은 repo:tag 로 푸시된 볼륨 아티팩트를 destRoot 아래에 풀고,
 // 재구성된 VolumeIndex 를 반환함. TODO 수정해줘야 함. 다음에는 이것부터 하자.
-func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) (*VolumeIndex, error) {
-	// 1) OCI 스토어 열기
+func FetchVolumeFromOCI(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex, error) {
+	// 1) Open OCI store
 	store, err := oci.New(repo)
 	if err != nil {
-		return nil, fmt.Errorf("OCI 스토어 열기 실패 %s: %w", repo, err)
+		return nil, fmt.Errorf("failed to open OCI store at %s: %w", repo, err)
 	}
 
-	// 2) 매니페스트 Descriptor 조회
+	// 2) Resolve manifest descriptor
 	ref := fmt.Sprintf("%s:%s", repo, tag)
 	manifestDesc, err := store.Resolve(ctx, tag)
 	if err != nil {
-		return nil, fmt.Errorf("해당 참조 조회 실패 %s: %w", ref, err)
+		return nil, fmt.Errorf("failed to resolve reference %q: %w", ref, err)
 	}
 
+	// 3) Fetch and decode manifest
 	rc, err := store.Fetch(ctx, manifestDesc)
 	if err != nil {
-		return nil, fmt.Errorf("매니페스트 Fetch 실패: %w", err)
+		return nil, fmt.Errorf("failed to fetch manifest: %w", err)
 	}
 	defer rc.Close()
 
 	var manifest ocispec.Manifest
 	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
-		return nil, fmt.Errorf("매니페스트 스트림 디코딩 실패: %w", err)
+		return nil, fmt.Errorf("failed to decode manifest: %w", err)
 	}
 
-	// 4) VolumeIndex 초기화
+	// 4) Initialize VolumeIndex
 	vi := &VolumeIndex{
 		VolumeRef:  manifestDesc.Digest.String(),
 		Partitions: make([]Partition, len(manifest.Layers)),
 	}
 
-	// 5) 각 레이어(파티션) 풀기
+	// 5) For each layer, fetch & extract
 	for i, layerDesc := range manifest.Layers {
-		// 레이어 Reader 얻기 (tar.gz)
-		rc, err := store.Fetch(ctx, layerDesc)
+		layerRC, err := store.Fetch(ctx, layerDesc)
 		if err != nil {
-			return nil, fmt.Errorf("레이어 리더 생성 실패 %s: %w", layerDesc.Digest, err)
+			return nil, fmt.Errorf("failed to fetch layer %s: %w", layerDesc.Digest, err)
 		}
-		defer rc.Close()
+		defer layerRC.Close()
 
-		// 원래 파티션 경로는 레이어 어노테이션에 저장돼 있다고 가정
 		partPath := layerDesc.Annotations["org.example.partitionPath"]
 		targetDir := filepath.Join(destRoot, partPath)
 		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			return nil, fmt.Errorf("디렉터리 생성 실패 %s: %w", targetDir, err)
+			return nil, fmt.Errorf("failed to create directory %s: %w", targetDir, err)
 		}
 
-		// 압축 해제
-		if err := UntarGzDir(rc, targetDir); err != nil {
-			return nil, fmt.Errorf("레이어 압축 해제 실패 %s: %w", layerDesc.Digest, err)
+		if err := UntarGzDir(layerRC, targetDir); err != nil {
+			return nil, fmt.Errorf("failed to extract layer %s: %w", layerDesc.Digest, err)
 		}
 
-		// VolumeIndex 에 기록
 		vi.Partitions[i] = Partition{
 			Name:        partPath,
 			Path:        partPath,
@@ -480,17 +484,14 @@ func FetchVolumeFromOCI(ctx context.Context, destRoot string, repo, tag string) 
 		}
 	}
 
-	// 6) volume-index.json 다시 쓰기 (선택)
+	// 6) Write out volume-index.json
+	indexPath := filepath.Join(destRoot, "volume-index.json")
 	indexBytes, err := json.MarshalIndent(vi, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("VolumeIndex 마샬링 실패: %w", err)
+		return nil, fmt.Errorf("failed to marshal VolumeIndex: %w", err)
 	}
-	if err := os.WriteFile(
-		filepath.Join(destRoot, "volume-index.json"),
-		indexBytes,
-		0o644,
-	); err != nil {
-		return nil, fmt.Errorf("volume-index.json 쓰기 실패: %w", err)
+	if err := os.WriteFile(indexPath, indexBytes, 0o644); err != nil {
+		return nil, fmt.Errorf("failed to write %s: %w", indexPath, err)
 	}
 
 	return vi, nil

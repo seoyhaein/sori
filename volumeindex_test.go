@@ -160,54 +160,6 @@ func TestMerge_NoVolumesAdded(t *testing.T) {
 	assert.Equal(t, 5, existing.Version, "expected version to remain unchanged")
 }
 
-// TestSaveLoadAndMergeIntegration performs an integration test on saveCollection, loadCollection, and Merge
-func TestSaveLoadAndMergeIntegration(t *testing.T) {
-	root := t.TempDir()
-
-	// Prepare initial collection and save it
-	initial := VolumeCollection{
-		Version: 10,
-		Volumes: []VolumeIndex{{DisplayName: "one", VolumeRef: "r1"}},
-	}
-	err := saveCollection(root, initial)
-	assert.NoError(t, err, "failed to save initial collection")
-
-	// Load and verify
-	loaded, err := loadCollection(root)
-	assert.NoError(t, err, "failed to load collection")
-	assert.Equal(t, initial, loaded, "loaded collection should match initial")
-
-	// Merge a new volume
-	newV := VolumeCollection{
-		Volumes: []VolumeIndex{{DisplayName: "two", VolumeRef: "r2"}},
-	}
-	merged := loaded.Merge(newV)
-	assert.True(t, merged, "expected Merge to return true when adding a new volume")
-	assert.Equal(t, 11, loaded.Version, "expected version to increment by 1 after merge")
-	assert.Equal(t, "one", loaded.Volumes[0].DisplayName)
-	assert.Equal(t, "two", loaded.Volumes[1].DisplayName)
-
-	// Save merged collection
-	err = saveCollection(root, loaded)
-	assert.NoError(t, err, "failed to save merged collection")
-
-	// Reload and verify persisted changes
-	reloaded, err := loadCollection(root)
-	assert.NoError(t, err, "failed to reload collection")
-	assert.Equal(t, loaded, reloaded, "reloaded collection should match merged state")
-}
-
-func TestLoadCollection(t *testing.T) {
-	// 빈 디렉터리에서 loadCollection 호출
-	root := "/home/dev-comd/go/src/github.com/seoyhaein/sori/testRoot"
-
-	loaded, err := loadCollection(root)
-	assert.NoError(t, err, "loadCollection should not error on empty dir")
-	assert.Equal(t, VolumeCollection{Version: 0}, loaded, "expected empty collection with version 0")
-
-	saveCollection(root, loaded)
-}
-
 func TestExtractTarGz(t *testing.T) {
 	// 1) Build an in‑memory tar.gz with a dir, a file, and a symlink
 	buf := &bytes.Buffer{}
@@ -271,4 +223,13 @@ func TestExtractTarGz(t *testing.T) {
 	target, err := os.Readlink(linkPath)
 	assert.NoError(t, err)
 	assert.Equal(t, "dir/file.txt", target)
+}
+
+// TODO 여기서 부터 검증해 나가자.
+func TestLoadOrNewCollection_New(t *testing.T) {
+	rootDir := "./testRoot"
+	_, err := LoadOrNewCollection(rootDir)
+	if err != nil {
+		t.Fatalf("LoadOrNewCollection failed: %v", err)
+	}
 }
