@@ -19,8 +19,11 @@ import (
 	"oras.land/oras-go/v2/registry/remote/retry"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -45,14 +48,118 @@ type VolumeCollection struct {
 	Volumes []VolumeIndex `json:"volumes"`
 }
 
+// TODO 중요 oras-go 에서는 immutable 방식으로 만들어야 함. 이걸 잊어버리면 안된다.
+
 // TODO 빠르게 개발하기 위해 서일단 그냥 막씀.
 
 const CollectionFileName = "volume-collection.json"
 const OCIStore = "./repo"
 
 // TODO 정책을 정해야 하는데 일단, rootDir 안에 볼륨 폴더들이 있는 것이 원칙이다. 하지만 그렇게 하지 않다도 되게 일단 만들어 놓는다.
+// -> 이렇게 할경우 어떻게해 할지 생각해봐야 함., 복사해서 넣어줘야 할까??
 // TODO 그리고 볼륨 폴더에 는 volume-index.json 이 있어야 한다. 위치는 볼륨 폴더의 루트 위치에 있어야 한다. 그것들을 읽어서 VolumeCollection 을 만들어 주는 방식으로 간다.
+// -> 만약 이렇게 안되어 있으면 에러 뱉어내야 함. 그리고 생성할때 저렇게 배치되도록 해줘야 함.
 // TODO 이러한 내용은 사용자가 알아도 되지만 몰라도 된다. 이렇게 메서드들이 만들어 주는 방식으로 간다. 사용자 편의성을 위해서 사용자의 입력을 최소한으로 진행한다. <- 이렇게 하면, 메서드도 정리 해야 할 듯한데. 이건 생각해보자.
+
+// 일단 살펴보자.
+
+type CollectionManager struct {
+	mu    sync.RWMutex
+	root  string
+	coll  *VolumeCollection
+	byRef map[string]int
+}
+
+func NewCollectionManager(rootDir string, initial ...VolumeIndex) (*CollectionManager, error) {
+	coll, err := LoadOrNewCollection(rootDir, initial...)
+	if err != nil {
+		return nil, err
+	}
+
+	m := &CollectionManager{
+		root:  rootDir,
+		coll:  coll,
+		byRef: make(map[string]int, len(coll.Volumes)),
+	}
+	for i, v := range coll.Volumes {
+		if v.VolumeRef != "" { // 혹은 선택한 키
+			m.byRef[v.VolumeRef] = i
+		}
+	}
+	return m, nil
+}
+
+func (m *CollectionManager) AddOrUpdate(v VolumeIndex) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if idx, ok := m.byRef[v.VolumeRef]; ok {
+		// 변경 여부 체크 (선택)
+		if !reflect.DeepEqual(m.coll.Volumes[idx], v) {
+			m.coll.Volumes[idx] = v
+			m.coll.Version++
+		} else {
+			return nil // 내용 동일하면 flush 생략
+		}
+	} else {
+		m.coll.Volumes = append(m.coll.Volumes, v)
+		m.byRef[v.VolumeRef] = len(m.coll.Volumes) - 1
+		m.coll.Version++
+	}
+	return saveCollection(m.root, *m.coll)
+}
+
+func (m *CollectionManager) Remove(ref string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	idx, ok := m.byRef[ref]
+	if !ok {
+		return false, nil
+	}
+
+	// slice 삭제 (끝 요소 스왑·팝)
+	last := len(m.coll.Volumes) - 1
+	if idx != last {
+		m.coll.Volumes[idx] = m.coll.Volumes[last]
+		movedRef := m.coll.Volumes[idx].VolumeRef
+		m.byRef[movedRef] = idx
+	}
+	m.coll.Volumes = m.coll.Volumes[:last]
+	delete(m.byRef, ref)
+
+	m.coll.Version++
+	return true, saveCollection(m.root, *m.coll)
+}
+
+func (m *CollectionManager) GetSnapshot() VolumeCollection {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// 깊은 복사 (Volumes slice 복사)
+	out := VolumeCollection{
+		Version: m.coll.Version,
+		Volumes: make([]VolumeIndex, len(m.coll.Volumes)),
+	}
+	copy(out.Volumes, m.coll.Volumes)
+	return out
+}
+
+func (m *CollectionManager) Get(ref string) (VolumeIndex, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	idx, ok := m.byRef[ref]
+	if !ok {
+		return VolumeIndex{}, false
+	}
+	return m.coll.Volumes[idx], true
+}
+
+func (m *CollectionManager) Flush() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return saveCollection(m.root, *m.coll)
+}
 
 // LoadOrNewCollection rootDir/volume-collection.json 이 있으면 언마샬, 없으면 초기화 시킴.
 // 만약 아무것도 없다면 그냥 LoadOrNewCollection("") 이렇게 사용하면 됨.
@@ -423,25 +530,102 @@ func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user
 	return nil
 }
 
-// TODO 버그 있고 병렬적으로 가져오도록 해야 한다. 이건 테스트 진행해야 한다.
-
-// FetchVolumeFromOCI 은 repo:tag 로 푸시된 볼륨 아티팩트를 destRoot 아래에 풀고,
-// 재구성된 VolumeIndex 를 반환함. TODO 수정해줘야 함. 다음에는 이것부터 하자.
-func FetchVolumeFromOCI(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex, error) {
-	// 1) Open OCI store
+// FetchVolSeq 은 repo:tag 로 푸시된 볼륨 아티팩트를 destRoot 아래에 풀고,
+// 재구성된 VolumeIndex 를 반환함. TODO 수정해줘야 함. 다음에는 이것부터 하자. 테스트 하고 정교화 하자.
+func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex, error) {
 	store, err := oci.New(repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open OCI store at %s: %w", repo, err)
 	}
 
-	// 2) Resolve manifest descriptor
 	ref := fmt.Sprintf("%s:%s", repo, tag)
 	manifestDesc, err := store.Resolve(ctx, tag)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve reference %q: %w", ref, err)
 	}
 
-	// 3) Fetch and decode manifest
+	rc, err := store.Fetch(ctx, manifestDesc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch manifest: %w", err)
+	}
+	// manifest reader 하나만 defer
+	defer rc.Close()
+
+	var manifest ocispec.Manifest
+	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("failed to decode manifest: %w", err)
+	}
+
+	vi := &VolumeIndex{
+		VolumeRef:  manifestDesc.Digest.String(),
+		Partitions: make([]Partition, len(manifest.Layers)),
+	}
+
+	seen := make(map[string]struct{})
+
+	for i, layerDesc := range manifest.Layers {
+		layerRC, err := store.Fetch(ctx, layerDesc)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch layer %s: %w", layerDesc.Digest, err)
+		}
+
+		partPath := layerDesc.Annotations["org.example.partitionPath"]
+		if partPath == "" {
+			layerRC.Close()
+			return nil, fmt.Errorf("missing partitionPath annotation for layer %s", layerDesc.Digest)
+		}
+		if _, dup := seen[partPath]; dup {
+			layerRC.Close()
+			return nil, fmt.Errorf("duplicate partition path %q", partPath)
+		}
+		seen[partPath] = struct{}{}
+
+		targetDir := filepath.Join(destRoot, partPath)
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			layerRC.Close()
+			return nil, fmt.Errorf("failed to create directory %s: %w", targetDir, err)
+		}
+
+		if err := UntarGzDir(layerRC, targetDir); err != nil {
+			layerRC.Close()
+			return nil, fmt.Errorf("failed to extract layer %s: %w", layerDesc.Digest, err)
+		}
+
+		if err := layerRC.Close(); err != nil {
+			return nil, fmt.Errorf("failed to close layer reader %s: %w", layerDesc.Digest, err)
+		}
+
+		vi.Partitions[i] = Partition{
+			Name:        partPath,
+			Path:        partPath,
+			ManifestRef: layerDesc.Digest.String(),
+		}
+	}
+
+	indexPath := filepath.Join(destRoot, "volume-index.json")
+	indexBytes, err := json.MarshalIndent(vi, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal VolumeIndex: %w", err)
+	}
+	if err := os.WriteFile(indexPath, indexBytes, 0o644); err != nil {
+		return nil, fmt.Errorf("failed to write %s: %w", indexPath, err)
+	}
+
+	return vi, nil
+}
+
+// TODO 테스트 해봐야 함.
+func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
+	store, err := oci.New(repo)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open OCI store at %s: %w", repo, err)
+	}
+
+	manifestDesc, err := store.Resolve(ctx, tag)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve reference %q: %w", fmt.Sprintf("%s:%s", repo, tag), err)
+	}
+
 	rc, err := store.Fetch(ctx, manifestDesc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch manifest: %w", err)
@@ -453,45 +637,151 @@ func FetchVolumeFromOCI(ctx context.Context, destRoot, repo, tag string) (*Volum
 		return nil, fmt.Errorf("failed to decode manifest: %w", err)
 	}
 
-	// 4) Initialize VolumeIndex
+	n := len(manifest.Layers)
 	vi := &VolumeIndex{
 		VolumeRef:  manifestDesc.Digest.String(),
-		Partitions: make([]Partition, len(manifest.Layers)),
+		Partitions: make([]Partition, n),
 	}
 
-	// 5) For each layer, fetch & extract
-	for i, layerDesc := range manifest.Layers {
-		layerRC, err := store.Fetch(ctx, layerDesc)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch layer %s: %w", layerDesc.Digest, err)
-		}
-		defer layerRC.Close()
+	// ----- 1단계: 메타 검사 -----
+	seen := make(map[string]struct{}, n)
+	type layerMeta struct {
+		idx  int
+		desc ocispec.Descriptor
+		path string
+	}
+	metas := make([]layerMeta, 0, n)
 
-		partPath := layerDesc.Annotations["org.example.partitionPath"]
-		targetDir := filepath.Join(destRoot, partPath)
-		if err := os.MkdirAll(targetDir, 0o755); err != nil {
-			return nil, fmt.Errorf("failed to create directory %s: %w", targetDir, err)
+	for i, layer := range manifest.Layers {
+		partPath := layer.Annotations["org.example.partitionPath"]
+		if partPath == "" {
+			return nil, fmt.Errorf("missing partitionPath annotation for layer %s", layer.Digest)
 		}
-
-		if err := UntarGzDir(layerRC, targetDir); err != nil {
-			return nil, fmt.Errorf("failed to extract layer %s: %w", layerDesc.Digest, err)
+		if _, dup := seen[partPath]; dup {
+			return nil, fmt.Errorf("duplicate partition path %q", partPath)
 		}
+		seen[partPath] = struct{}{}
+		metas = append(metas, layerMeta{i, layer, partPath})
+	}
 
-		vi.Partitions[i] = Partition{
-			Name:        partPath,
-			Path:        partPath,
-			ManifestRef: layerDesc.Digest.String(),
+	if concurrency <= 0 || concurrency > n {
+		// 기본값: CPU 코어 수와 n 중 작은 값
+		cpu := runtime.NumCPU()
+		if cpu < 1 {
+			cpu = 1
+		}
+		if cpu > n {
+			cpu = n
+		}
+		concurrency = cpu
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// ----- 2단계: 병렬 처리 -----
+	type jobResult struct {
+		idx int
+		p   Partition
+		err error
+	}
+
+	jobs := make(chan layerMeta)
+	results := make(chan jobResult)
+	var wg sync.WaitGroup
+
+	worker := func() {
+		defer wg.Done()
+		for meta := range jobs {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			layerRC, err := store.Fetch(ctx, meta.desc)
+			if err != nil {
+				results <- jobResult{idx: meta.idx, err: fmt.Errorf("fetch layer %s: %w", meta.desc.Digest, err)}
+				cancel()
+				continue
+			}
+
+			targetDir := filepath.Join(destRoot, meta.path)
+			if err := os.MkdirAll(targetDir, 0o755); err != nil {
+				layerRC.Close()
+				results <- jobResult{idx: meta.idx, err: fmt.Errorf("mkdir %s: %w", targetDir, err)}
+				cancel()
+				continue
+			}
+
+			if err := UntarGzDir(layerRC, targetDir); err != nil {
+				layerRC.Close()
+				results <- jobResult{idx: meta.idx, err: fmt.Errorf("extract layer %s: %w", meta.desc.Digest, err)}
+				cancel()
+				continue
+			}
+
+			if err := layerRC.Close(); err != nil {
+				results <- jobResult{idx: meta.idx, err: fmt.Errorf("close reader %s: %w", meta.desc.Digest, err)}
+				cancel()
+				continue
+			}
+
+			results <- jobResult{
+				idx: meta.idx,
+				p: Partition{
+					Name:        meta.path,
+					Path:        meta.path,
+					ManifestRef: meta.desc.Digest.String(),
+				},
+			}
 		}
 	}
 
-	// 6) Write out volume-index.json
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go worker()
+	}
+
+	go func() {
+		for _, m := range metas {
+			jobs <- m
+		}
+		close(jobs)
+	}()
+
+	var firstErr error
+	completed := 0
+	for completed < n {
+		r := <-results
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+		}
+		if r.err == nil {
+			vi.Partitions[r.idx] = r.p
+		}
+		completed++
+		if firstErr != nil {
+			// drain 남은 결과 (cancel 후 워커 종료 대기)
+			// 단, 빠르게 빠져나가고 싶으면 break 후 Wait; 여기서는 안전하게 모두 수신
+		}
+	}
+	cancel()
+	wg.Wait()
+	close(results)
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	// ----- 3단계: volume-index.json 기록 -----
 	indexPath := filepath.Join(destRoot, "volume-index.json")
 	indexBytes, err := json.MarshalIndent(vi, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal VolumeIndex: %w", err)
+		return nil, fmt.Errorf("marshal VolumeIndex: %w", err)
 	}
 	if err := os.WriteFile(indexPath, indexBytes, 0o644); err != nil {
-		return nil, fmt.Errorf("failed to write %s: %w", indexPath, err)
+		return nil, fmt.Errorf("write %s: %w", indexPath, err)
 	}
 
 	return vi, nil

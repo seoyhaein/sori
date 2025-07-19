@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"github.com/stretchr/testify/assert"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -97,9 +99,9 @@ func TestFetchVolumeFromOCI(t *testing.T) {
 
 	repo := "./repo"
 	dest := "./test-vol-restored"
-	_, err := FetchVolumeFromOCI(ctx, dest, repo, "v1.0.0")
+	_, err := FetchVolSeq(ctx, dest, repo, "v1.0.0")
 	if err != nil {
-		t.Fatalf("FetchVolumeFromOCI failed: %v", err)
+		t.Fatalf("FetchVolSeq failed: %v", err)
 	}
 
 }
@@ -232,4 +234,66 @@ func TestLoadOrNewCollection_New(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrNewCollection failed: %v", err)
 	}
+}
+
+func TestManager(t *testing.T) {
+
+	rootDir := "./testRoot"
+	// 1. 매니저 초기화 (기존 파일 있으면 로드, 없으면 새로 생성)
+	manager, err := NewCollectionManager(rootDir)
+	if err != nil {
+		log.Fatalf("failed to init collection manager: %v", err)
+	}
+
+	// 2. 새 볼륨을 하나 만든다고 가정 (예: OCI Push 후 얻은 digest)
+	v1 := VolumeIndex{
+		VolumeRef:   "sha256:111aaa...",
+		DisplayName: "HumanRef_GRCh38",
+	}
+	if err := manager.AddOrUpdate(v1); err != nil {
+		log.Fatalf("AddOrUpdate v1: %v", err)
+	}
+
+	// 3. 같은 ref 를 내용 바꿔서 갱신
+	v1Updated := VolumeIndex{
+		VolumeRef:   "sha256:111aaa...",
+		DisplayName: "HumanRef_GRCh38 (patched)",
+	}
+	if err := manager.AddOrUpdate(v1Updated); err != nil {
+		log.Fatalf("AddOrUpdate v1Updated: %v", err)
+	}
+
+	// 4. 다른 볼륨 추가
+	v2 := VolumeIndex{
+		VolumeRef:   "sha256:222bbb...",
+		DisplayName: "VCF Panel 2025-07",
+	}
+	if err := manager.AddOrUpdate(v2); err != nil {
+		log.Fatalf("AddOrUpdate v2: %v", err)
+	}
+
+	// 5. 개별 조회
+	got, ok := manager.Get("sha256:111aaa...")
+	if ok {
+		fmt.Printf("Get sha256:111aaa... => %+v\n", got)
+	}
+
+	// 6. 스냅샷 조회 (읽기용 복사본)
+	snap := manager.GetSnapshot()
+	fmt.Printf("Snapshot Version=%d, count=%d\n", snap.Version, len(snap.Volumes))
+
+	// 7. 제거
+	if removed, err := manager.Remove("sha256:222bbb..."); err != nil {
+		log.Fatalf("Remove: %v", err)
+	} else if removed {
+		fmt.Println("Removed sha256:222bbb...")
+	}
+
+	// 8. 필요 시 명시적 Flush (Add/Update/Remove 에서 이미 저장되지만 강제 저장 가능)
+	if err := manager.Flush(); err != nil {
+		log.Fatalf("Flush: %v", err)
+	}
+
+	fmt.Println("Done.")
+	_ = context.Background() // (예: 다른 로직에서 사용할 수도 있음)
 }
