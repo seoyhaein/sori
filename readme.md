@@ -49,6 +49,7 @@ proto.Unmarshal(data, &m)
 - 볼륨 만들어 주는 메서드와 통합하는 별도의 main.go 만들어서 진행하기 여기서 별도의 메서드 도출해야 함.
 - 생각하기에서 복원 및 백업, 버전 관리 등에 대한 메서드 개발 해야함.
 - 테스트 철저하기 진행하기 어느정도 완료한다음에 codex 활용
+- repo 이름 정하기 이거 config 파일에 넣어서 관리하는 것 생각하고 구현해야 함. 내부적으로 숨길 수 있도록 한다.
 
 ### oras-go
 - https://github.com/oras-project/oras-go/blob/main/docs/tutorial/quickstart.md
