@@ -89,7 +89,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode json: %w", err)
 	}
 
-	// 유효성 검사
+	// 유효성 검사 TODO 지금 이렇게 간단히 하지만, 별도의 메서드를 만들어서 configblob 도 확인해줘야 함.
 	if cfg.Local.Path == "" {
 		return nil, fmt.Errorf("local.path is empty")
 	}
