@@ -53,7 +53,9 @@ type VolumeCollection struct {
 // TODO 빠르게 개발하기 위해 서일단 그냥 막씀.
 
 const CollectionFileName = "volume-collection.json"
-const OCIStore = "./repo"
+const defaultOCIStore = "/var/lib/sori/oci"
+
+var ociStore = defaultOCIStore
 
 // TODO 정책을 정해야 하는데 일단, rootDir 안에 볼륨 폴더들이 있는 것이 원칙이다. 하지만 그렇게 하지 않다도 되게 일단 만들어 놓는다.
 // -> 이렇게 할경우 어떻게해 할지 생각해봐야 함., 복사해서 넣어줘야 할까??
@@ -374,7 +376,7 @@ func (vi *VolumeIndex) SaveToFile(rootPath string) error {
 // TODO wraper method 를 하나 더 두어서 OCIStore 이렇게 처리 하지 말고, 입력받도록 처리하는 메서드를 하나 더 두어서 다양항하게 접근하자. <- 이건 생각해보자.
 func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
 	// 1) Init OCI store
-	store, err := oci.New(OCIStore)
+	store, err := oci.New(ociStore)
 	if err != nil {
 		return nil, fmt.Errorf("init OCI store: %w", err)
 	}
