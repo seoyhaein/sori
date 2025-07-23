@@ -53,9 +53,6 @@ type VolumeCollection struct {
 // TODO 빠르게 개발하기 위해 서일단 그냥 막씀.
 
 const CollectionFileName = "volume-collection.json"
-const defaultOCIStore = "/var/lib/sori/oci"
-
-var ociStore = defaultOCIStore
 
 // TODO 정책을 정해야 하는데 일단, rootDir 안에 볼륨 폴더들이 있는 것이 원칙이다. 하지만 그렇게 하지 않다도 되게 일단 만들어 놓는다.
 // -> 이렇게 할경우 어떻게해 할지 생각해봐야 함., 복사해서 넣어줘야 할까??
@@ -64,6 +61,8 @@ var ociStore = defaultOCIStore
 // TODO 이러한 내용은 사용자가 알아도 되지만 몰라도 된다. 이렇게 메서드들이 만들어 주는 방식으로 간다. 사용자 편의성을 위해서 사용자의 입력을 최소한으로 진행한다. <- 이렇게 하면, 메서드도 정리 해야 할 듯한데. 이건 생각해보자.
 
 // 일단 살펴보자.
+
+// TODO 스왑-팝(swap-pop) 패턴 관련 살벼 보자.
 
 type CollectionManager struct {
 	mu    sync.RWMutex
@@ -89,6 +88,45 @@ func NewCollectionManager(rootDir string, initial ...VolumeIndex) (*CollectionMa
 		}
 	}
 	return m, nil
+}
+
+// LoadOrNewCollection rootDir/volume-collection.json 이 있으면 언마샬, 없으면 초기화 시킴.
+// 만약 아무것도 없다면 그냥 LoadOrNewCollection("") 이렇게 사용하면 됨.
+func LoadOrNewCollection(rootDir string, initialVolumes ...VolumeIndex) (*VolumeCollection, error) {
+	// 1) 컬렉션 파일 경로 준비
+	path := filepath.Join(rootDir, CollectionFileName)
+
+	// 2) 기존 파일 읽기 시도
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// 2-1) 파일이 없으면 새 컬렉션 생성 + 저장
+		if os.IsNotExist(err) {
+			coll := NewVolumeCollection(initialVolumes...)
+			if err := saveCollection(rootDir, *coll); err != nil {
+				return nil, fmt.Errorf("failed to save new collection: %w", err)
+			}
+			return coll, nil
+		}
+		// 2-2) 그 외 I/O 에러
+		return nil, fmt.Errorf("read collection file: %w", err)
+	}
+
+	// 3) 파일이 존재하면 JSON 언마샬
+	var coll VolumeCollection
+	if err := json.Unmarshal(data, &coll); err != nil {
+		return nil, fmt.Errorf("unmarshal collection JSON: %w", err)
+	}
+	return &coll, nil
+}
+
+// NewVolumeCollection 생성 시 초기 Version 을 1 로 설정
+func NewVolumeCollection(initialVolumes ...VolumeIndex) *VolumeCollection {
+	coll := &VolumeCollection{
+		Version: 1,
+		Volumes: make([]VolumeIndex, len(initialVolumes)),
+	}
+	copy(coll.Volumes, initialVolumes)
+	return coll
 }
 
 func (m *CollectionManager) AddOrUpdate(v VolumeIndex) error {
@@ -161,45 +199,6 @@ func (m *CollectionManager) Flush() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return saveCollection(m.root, *m.coll)
-}
-
-// LoadOrNewCollection rootDir/volume-collection.json 이 있으면 언마샬, 없으면 초기화 시킴.
-// 만약 아무것도 없다면 그냥 LoadOrNewCollection("") 이렇게 사용하면 됨.
-func LoadOrNewCollection(rootDir string, initialVolumes ...VolumeIndex) (*VolumeCollection, error) {
-	// 1) 컬렉션 파일 경로 준비
-	path := filepath.Join(rootDir, CollectionFileName)
-
-	// 2) 기존 파일 읽기 시도
-	data, err := os.ReadFile(path)
-	if err != nil {
-		// 2-1) 파일이 없으면 새 컬렉션 생성 + 저장
-		if os.IsNotExist(err) {
-			coll := NewVolumeCollection(initialVolumes...)
-			if err := saveCollection(rootDir, *coll); err != nil {
-				return nil, fmt.Errorf("failed to save new collection: %w", err)
-			}
-			return coll, nil
-		}
-		// 2-2) 그 외 I/O 에러
-		return nil, fmt.Errorf("read collection file: %w", err)
-	}
-
-	// 3) 파일이 존재하면 JSON 언마샬
-	var coll VolumeCollection
-	if err := json.Unmarshal(data, &coll); err != nil {
-		return nil, fmt.Errorf("unmarshal collection JSON: %w", err)
-	}
-	return &coll, nil
-}
-
-// NewVolumeCollection 생성 시 초기 Version 을 1 로 설정
-func NewVolumeCollection(initialVolumes ...VolumeIndex) *VolumeCollection {
-	coll := &VolumeCollection{
-		Version: 1,
-		Volumes: make([]VolumeIndex, len(initialVolumes)),
-	}
-	copy(coll.Volumes, initialVolumes)
-	return coll
 }
 
 // loadMetadataJSON (위의) 임의의 json 파일을 읽어와서 []byte 로 변환, -> config blob 으로 채워짐.
@@ -950,4 +949,28 @@ func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
 
 	// 5) Now buf contains a complete, deterministic .tar.gz
 	return buf.Bytes(), nil
+}
+
+// 통합 메서드
+
+func PublishVolumeWithConfig(ctx context.Context, volDir string, displayName string, tag string, configBlobPath string) (*VolumeIndex, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	vi, err := GenerateVolumeIndex(volDir, displayName)
+	if err != nil {
+		return nil, fmt.Errorf("generate volume index: %w", err)
+	}
+
+	configBlob, err := loadMetadataJSON(configBlobPath)
+	if err != nil {
+		return nil, fmt.Errorf("load config blob %q: %w", configBlobPath, err)
+	}
+
+	published, err := vi.PublishVolume(ctx, volDir, tag, configBlob)
+	if err != nil {
+		return nil, fmt.Errorf("publish volume: %w", err)
+	}
+	return published, nil
 }

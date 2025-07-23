@@ -43,14 +43,18 @@ type AuthConfig struct {
 
 // TODO 이렇게 하는 방식으로 표준을 정하자.
 const defaultDirPerm fs.FileMode = 0o755
+const defaultOCIStore = "/var/lib/sori/oci"
 
-func InitConfig(path string) error {
+var ociStore = defaultOCIStore
+
+func InitConfig(path string) (*Config, error) {
 	cfg, err := LoadConfig(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ociStore = cfg.Local.Path
-	return nil
+	Log.Infof("oci store path: %s", ociStore)
+	return cfg, nil
 }
 
 // LoadConfig reads and unmarshals the JSON file.
@@ -120,15 +124,17 @@ func (conf *Config) EnsureDir() error {
 	info, err := os.Stat(p)
 	if err == nil {
 		if info.IsDir() {
+			Log.Infof("%s is ready", p)
 			return nil
 		}
 		return fmt.Errorf("path '%s' already exists but is not a directory", p)
 	}
-	// 해당 디렉토리가 없으면 만들어줌.
+	// 해당 디렉토리가 없으면 만들어줌. /var/lib/sori/oci 여기를 디폴트로 잡아주긴 하는데 이건 루트 사용자만 만들 수 있다.
 	if errors.Is(err, os.ErrNotExist) {
 		if mkdirErr := os.MkdirAll(p, defaultDirPerm); mkdirErr != nil {
 			return fmt.Errorf("failed to create directory '%s': %w", p, mkdirErr)
 		}
+		Log.Infof("Created directory: %s", p)
 		return nil
 	}
 	return fmt.Errorf("failed to check directory '%s': %w", p, err)

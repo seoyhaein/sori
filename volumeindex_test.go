@@ -297,3 +297,31 @@ func TestManager(t *testing.T) {
 	fmt.Println("Done.")
 	_ = context.Background() // (예: 다른 로직에서 사용할 수도 있음)
 }
+
+func TestOciService(t *testing.T) {
+	conf, err := InitConfig("sori-oci.json")
+	if err != nil {
+		t.Fatalf("InitConfig failed: %v", err)
+	}
+
+	err = conf.EnsureDir()
+	if err != nil {
+		t.Fatalf("EnsureDir failed: %v", err)
+	}
+
+	// oci store 에 저장. 여기 부터는 cli 와 맞다 있는 부분임.
+	// 볼륨 폴더, 그리고 해당 폴더에 configblob.json 이 있어야 함. 그리고 해당 볼륨을 저장할때 저장할 이름 넣어줘야 함.
+	// TODO 여기서 볼륨 네임하고, 사용자에게 보여줄 displayname 이 구벼뢰는데 구별할 필요가 있을까 생각이 됨. 일단 넣어줌.
+	volDir := "./test-vol"
+	vi, err := GenerateVolumeIndex(volDir, "테스트 하는 볼륨")
+	if err != nil {
+		t.Fatalf("GenerateVolumeIndex failed: %v", err)
+	}
+	configblob, err := loadMetadataJSON("configblob.json")
+	if err != nil {
+		t.Fatalf(" failed to load configblob juson:%v", err)
+	}
+
+	_, err = vi.PublishVolume(context.Background(), volDir, "test.v1.0.0", configblob)
+
+}

@@ -3,9 +3,26 @@ package sori
 import "testing"
 
 func TestLoadConfig(t *testing.T) {
-	_, err := LoadConfig("sori-oci.json")
+	conf, err := LoadConfig("sori-oci.json")
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	err = conf.EnsureDir()
+	if err != nil {
+		t.Fatalf("EnsureDir failed: %v", err)
+	}
+}
+
+func TestInitConfig(t *testing.T) {
+	conf, err := InitConfig("sori-oci.json")
+	if err != nil {
+		t.Fatalf("InitConfig failed: %v", err)
+	}
+
+	err = conf.EnsureDir()
+	if err != nil {
+		t.Fatalf("EnsureDir failed: %v", err)
 	}
 }
 
