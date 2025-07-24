@@ -77,10 +77,11 @@ proto.Unmarshal(data, &m)
 
 ### 버전관리, 복원 및 백업 시나리오
 - 볼륨과 실제 oci store 에 저장되어 있는 것은 같은 것이어야 한다. 이것을 검색하는 키는 결국 volume-collection.json 이고 이게 클라이언트로 갈때는 proto 파일로 전송된다.
-- 만약, volume-collection.json 이게 없다면, 먼저 볼륨에 있는지 확인하고, 여기서 가져온다. 이 데이터를 통해서 volume-collection.json 을 만들어 준다.
-- 만약, volume-collection.json 이 없고, 볼륨이 없다면, oci store 에서 가져와서 volume-collection.json 을 만들어 준다.
+~~- 만약, volume-collection.json 이게 없다면, 먼저 볼륨에 있는지 확인하고, 여기서 가져온다. 이 데이터를 통해서 volume-collection.json 을 만들어 준다.~~
+~~- 만약, volume-collection.json 이 없고, 볼륨이 없다면, oci store 에서 가져와서 volume-collection.json 을 만들어 준다.~~
 - volume-collection.json 을 통해서 볼륨을 만들어주거나, oci store 를 만들어준다. 
 - 만약 volume-collection.json 만 있고, 데이터가 없다면, 이건 실패다.
 - 가장 취약한 데이터는 볼륨과 volume-collection.json 이다. 
 - 복원 할 수 있는 메서드들을 만들어 두어야 한다.
+- race 테스트 해야함. 그리고 lock unlcok 에 대해서 다른 메서드들도 필요한지 생각해야 함.
 
