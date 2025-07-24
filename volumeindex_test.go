@@ -363,7 +363,7 @@ func TestValidateVolumeDir_CreateConfigBlob(t *testing.T) {
 	}
 
 	// configblob.json 파일이 생성되었는지 확인
-	cfgPath := filepath.Join(tmp, ConfigBlobFileName)
+	cfgPath := filepath.Join(tmp, ConfigBlobJson)
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("failed to read configblob.json: %v", err)
@@ -381,7 +381,7 @@ func TestValidateVolumeDir_LoadConfigBlob(t *testing.T) {
 	}
 	// 유효한 JSON configblob.json 생성
 	blob := `{"key":"value"}`
-	cfgPath := filepath.Join(tmp, ConfigBlobFileName)
+	cfgPath := filepath.Join(tmp, ConfigBlobJson)
 	if err := os.WriteFile(cfgPath, []byte(blob), 0644); err != nil {
 		t.Fatalf("failed to write configblob.json: %v", err)
 	}

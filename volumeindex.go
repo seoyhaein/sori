@@ -58,27 +58,13 @@ type (
 	}
 )
 
-// TODO 중요 oras-go 에서는 immutable 방식으로 만들어야 함. 이걸 잊어버리면 안된다.
-// TODO 빠르게 개발하기 위해 서일단 그냥 막씀.
-
 const (
 	ConfigBlobJson  = "configblob.json"
 	CollectionJson  = "volume-collection.json"
 	VolumeIndexJson = "volume-index.json"
 )
 
-// TODO 정책을 정해야 하는데 일단, rootDir 안에 볼륨 폴더들이 있는 것이 원칙이다. 하지만 그렇게 하지 않다도 되게 일단 만들어 놓는다.
-// -> 이렇게 할경우 어떻게해 할지 생각해봐야 함., 복사해서 넣어줘야 할까??
-// TODO 그리고 볼륨 폴더에 는 volume-index.json 이 있어야 한다. 위치는 볼륨 폴더의 루트 위치에 있어야 한다. 그것들을 읽어서 VolumeCollection 을 만들어 주는 방식으로 간다.
-// -> 만약 이렇게 안되어 있으면 에러 뱉어내야 함. 그리고 생성할때 저렇게 배치되도록 해줘야 함.
-// TODO 이러한 내용은 사용자가 알아도 되지만 몰라도 된다. 이렇게 메서드들이 만들어 주는 방식으로 간다. 사용자 편의성을 위해서 사용자의 입력을 최소한으로 진행한다. <- 이렇게 하면, 메서드도 정리 해야 할 듯한데. 이건 생각해보자.
-
-// 일단 살펴보자.
-
-// TODO 스왑-팝(swap-pop) 패턴 관련 살벼 보자.
-
 func NewCollectionManager(rootDir string, initial ...VolumeEntry) (*CollectionManager, error) {
-	// LoadOrNewCollection 도 initial 타입을 VolumeEntry 로 받도록 변경되어야 합니다.
 	coll, err := LoadOrNewCollection(rootDir, initial...)
 	if err != nil {
 		return nil, err
@@ -302,9 +288,6 @@ func saveCollection(rootDir string, coll VolumeCollection) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// TODO volume-index.json 이거 받도록 해주고, 이거 제외해줘야 한다. 다른 폴더에 저장하던가.
-// TODO json 분리하는 방안도 생각해보자.
-
 // GenerateVolumeIndex 디렉토리를 검사하면서 초기 VolumeIndex 를 생성함. displayName 사용자에게 보여줄 volume 이름.
 func GenerateVolumeIndex(rootPath, displayName string) (*VolumeIndex, error) {
 	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
@@ -383,31 +366,7 @@ func (vi *VolumeIndex) SaveToFile(rootPath string) error {
 	return nil
 }
 
-// TODO 파일 이름은 고정해두어야 할 거같은데 정하지 못했다.
-// TODO 이렇게 임의의 key, value 로 잡아 두도록 한다.
-
-/*
-{
-  "referenceName": "GRCh38",
-  "organism": "Homo sapiens",
-  "sequenceCount": 24,
-  "totalBaseCount": 3200456742,
-  "format": "FASTA.GZ",
-  "compression": "gzip",
-  "lineWrap": 60,
-  "created": "2025-07-15T19:30:00Z",
-  "pipelineVersion": "v2.3.1",
-  "checksum": "sha256:abcdef1234567890…",
-  "checksumAlgorithm": "sha256",
-  "description": "Primary tumor WGS FASTA, trimmed and filtered",
-  "notes": "Adapters removed with Trimmomatic v0.39; low-quality bases (<Q20) filtered"
-}
-*/
-
-// TODO 별도의 MediaType 을 설정할지 고민하자. 지금은 현재 image 를 차용해서 사용하고 있다.
-
 // PublishVolume GenerateVolumeIndex 에서 생성된 VolumeIndex 를 받아 OCI 스토어에 올리고, 업데이트된 VolumeIndex 를 리턴한다. volName 은 tag 까지 포함한다.
-// TODO wraper method 를 하나 더 두어서 OCIStore 이렇게 처리 하지 말고, 입력받도록 처리하는 메서드를 하나 더 두어서 다양항하게 접근하자. <- 이건 생각해보자.
 func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
 	// 1) Init OCI store
 	store, err := oci.New(ociStore)
@@ -416,7 +375,7 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 	}
 
 	anyPushed := false
-	// helper: push blob if not exists, returns pointer to bool pushed
+	// helper: push blob if not exists, returns a pointer to bool pushed
 	pushIfNeeded := func(desc ocispec.Descriptor, r io.Reader) (*bool, error) {
 		exists, err := store.Exists(ctx, desc)
 		if err != nil {
@@ -650,7 +609,7 @@ func FetchVolSeq(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex,
 	return vi, nil
 }
 
-// TODO 테스트 해봐야 함.
+// FetchVolParallel TODO 테스트 해봐야 함.
 func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error) {
 	store, err := oci.New(repo)
 	if err != nil {
@@ -1039,24 +998,75 @@ func ValidateVolumeDir(volDir string) ([]byte, error) {
 
 // 통합 메서드
 
-func PublishVolumeWithConfig(ctx context.Context, volDir string, displayName string, tag string, configBlobPath string) (*VolumeIndex, error) {
-	if ctx == nil {
-		ctx = context.Background()
+func (m *CollectionManager) PublishVolumeFromDir(ctx context.Context, volDir, displayName, tag string) error {
+	// 1) 디렉토리 검증 및 configblob.json 로드/생성
+	rawConfig, err := ValidateVolumeDir(volDir)
+	if err != nil {
+		return fmt.Errorf("ValidateVolumeDir failed: %w", err)
 	}
 
+	// 2) raw JSON → ConfigBlob
+	var cb ConfigBlob
+	if err := json.Unmarshal(rawConfig, &cb); err != nil {
+		return fmt.Errorf("failed to parse configblob.json: %w", err)
+	}
+
+	// 3) VolumeIndex 생성
 	vi, err := GenerateVolumeIndex(volDir, displayName)
 	if err != nil {
-		return nil, fmt.Errorf("generate volume index: %w", err)
+		return fmt.Errorf("GenerateVolumeIndex failed: %w", err)
 	}
 
-	configBlob, err := loadMetadataJSON(configBlobPath)
+	// 4) OCI에 퍼블리시
+	newVi, err := vi.PublishVolume(ctx, volDir, tag, rawConfig)
 	if err != nil {
-		return nil, fmt.Errorf("load config blob %q: %w", configBlobPath, err)
+		return fmt.Errorf("PublishVolume failed: %w", err)
+	}
+	if newVi == nil {
+		return fmt.Errorf("PublishVolume returned nil VolumeIndex")
 	}
 
-	published, err := vi.PublishVolume(ctx, volDir, tag, configBlob)
-	if err != nil {
-		return nil, fmt.Errorf("publish volume: %w", err)
+	// 5) 컬렉션에 추가
+	entry := VolumeEntry{
+		Index:      *newVi,
+		ConfigBlob: cb,
 	}
-	return published, nil
+	if err := m.AddOrUpdate(entry); err != nil {
+		return fmt.Errorf("AddOrUpdate failed: %w", err)
+	}
+
+	return nil
 }
+
+// TODO 파일 이름은 고정해두어야 할 거같은데 정하지 못했다.
+// TODO 이렇게 임의의 key, value 로 잡아 두도록 한다.
+
+/*
+{
+  "referenceName": "GRCh38",
+  "organism": "Homo sapiens",
+  "sequenceCount": 24,
+  "totalBaseCount": 3200456742,
+  "format": "FASTA.GZ",
+  "compression": "gzip",
+  "lineWrap": 60,
+  "created": "2025-07-15T19:30:00Z",
+  "pipelineVersion": "v2.3.1",
+  "checksum": "sha256:abcdef1234567890…",
+  "checksumAlgorithm": "sha256",
+  "description": "Primary tumor WGS FASTA, trimmed and filtered",
+  "notes": "Adapters removed with Trimmomatic v0.39; low-quality bases (<Q20) filtered"
+}
+*/
+
+// TODO 정책을 정해야 하는데 일단, rootDir 안에 볼륨 폴더들이 있는 것이 원칙이다. 하지만 그렇게 하지 않다도 되게 일단 만들어 놓는다.
+// -> 이렇게 할경우 어떻게해 할지 생각해봐야 함., 복사해서 넣어줘야 할까??
+// TODO 그리고 볼륨 폴더에 는 volume-index.json 이 있어야 한다. 위치는 볼륨 폴더의 루트 위치에 있어야 한다. 그것들을 읽어서 VolumeCollection 을 만들어 주는 방식으로 간다.
+// -> 만약 이렇게 안되어 있으면 에러 뱉어내야 함. 그리고 생성할때 저렇게 배치되도록 해줘야 함.
+// TODO 이러한 내용은 사용자가 알아도 되지만 몰라도 된다. 이렇게 메서드들이 만들어 주는 방식으로 간다. 사용자 편의성을 위해서 사용자의 입력을 최소한으로 진행한다. <- 이렇게 하면, 메서드도 정리 해야 할 듯한데. 이건 생각해보자.
+
+// 일단 살펴보자.
+
+// TODO 스왑-팝(swap-pop) 패턴 관련 살벼 보자.
+
+// TODO 별도의 MediaType 을 설정할지 고민하자. 지금은 현재 image 를 차용해서 사용하고 있다.

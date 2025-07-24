@@ -9,41 +9,38 @@ import (
 	"path/filepath"
 )
 
-type Config struct {
-	Local   LocalStore    `json:"local"`
-	Remotes []RemoteStore `json:"remotes"`
-}
+type (
+	Config struct {
+		Local   LocalStore    `json:"local"`
+		Remotes []RemoteStore `json:"remotes"`
+	}
+	LocalStore struct {
+		Type string `json:"type"` // "oci"
+		Path string `json:"path"`
+	}
+	RemoteStore struct {
+		Name       string     `json:"name"`
+		Type       string     `json:"type"`       // "registry"
+		Registry   string     `json:"registry"`   // e.g. harbor.local
+		Repository string     `json:"repository"` // e.g. harbor 인 경우 project/repo
+		TLS        TLSConfig  `json:"tls"`
+		Auth       AuthConfig `json:"auth"`
+	}
+	TLSConfig struct {
+		Insecure bool   `json:"insecure"`
+		CAFile   string `json:"ca_file"`
+	}
+	AuthConfig struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Token    string `json:"token"`
+	}
+)
 
-type LocalStore struct {
-	Type string `json:"type"` // "oci"
-	Path string `json:"path"`
-}
-
-type RemoteStore struct {
-	Name       string     `json:"name"`
-	Type       string     `json:"type"`       // "registry"
-	Registry   string     `json:"registry"`   // e.g. harbor.local
-	Repository string     `json:"repository"` // e.g. harbor 인 경우 project/repo
-	Push       bool       `json:"push"`
-	Pull       bool       `json:"pull"`
-	TLS        TLSConfig  `json:"tls"`
-	Auth       AuthConfig `json:"auth"`
-}
-
-type TLSConfig struct {
-	Insecure bool   `json:"insecure"`
-	CAFile   string `json:"ca_file"`
-}
-
-type AuthConfig struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Token    string `json:"token"`
-}
-
-// TODO 이렇게 하는 방식으로 표준을 정하자.
-const defaultDirPerm fs.FileMode = 0o755
-const defaultOCIStore = "/var/lib/sori/oci"
+const (
+	defaultDirPerm  fs.FileMode = 0o755
+	defaultOCIStore             = "/var/lib/sori/oci"
+)
 
 var ociStore = defaultOCIStore
 
