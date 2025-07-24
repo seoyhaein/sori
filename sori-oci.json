@@ -9,8 +9,6 @@
       "type": "registry",
       "registry": "harbor.local",
       "repository": "demo-project/testrepo",
-      "push": true,
-      "pull": true,
       "tls": {
         "insecure": false,
         "ca_file": ""
