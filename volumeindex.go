@@ -42,8 +42,20 @@ type VolumeIndex struct {
 	Partitions  []Partition `json:"partitions"`
 }
 
-// VolumeCollection 여러 개의 VolumeIndex 를 담는 구조체
+type ConfigBlob map[string]interface{}
+
+type VolumeEntry struct {
+	Index      VolumeIndex `json:"index"`
+	ConfigBlob ConfigBlob  `json:"configBlob"`
+}
+
 type VolumeCollection struct {
+	Version int           `json:"version"` // 변경될 때마다 +1
+	Volumes []VolumeEntry `json:"volumes"`
+}
+
+// VolumeCollection 여러 개의 VolumeIndex 를 담는 구조체
+type VolumeCollectionOld struct {
 	Version int           `json:"version"` // 변경될 때마다 +1
 	Volumes []VolumeIndex `json:"volumes"`
 }
@@ -71,7 +83,8 @@ type CollectionManager struct {
 	byRef map[string]int
 }
 
-func NewCollectionManager(rootDir string, initial ...VolumeIndex) (*CollectionManager, error) {
+func NewCollectionManager(rootDir string, initial ...VolumeEntry) (*CollectionManager, error) {
+	// LoadOrNewCollection 도 initial 타입을 VolumeEntry 로 받도록 변경되어야 합니다.
 	coll, err := LoadOrNewCollection(rootDir, initial...)
 	if err != nil {
 		return nil, err
@@ -82,17 +95,47 @@ func NewCollectionManager(rootDir string, initial ...VolumeIndex) (*CollectionMa
 		coll:  coll,
 		byRef: make(map[string]int, len(coll.Volumes)),
 	}
-	for i, v := range coll.Volumes {
-		if v.VolumeRef != "" { // 혹은 선택한 키
-			m.byRef[v.VolumeRef] = i
+	// 이제 entry.Index.VolumeRef 를 기준으로 인덱스 맵 구성
+	for i, entry := range coll.Volumes {
+		ref := entry.Index.VolumeRef
+		if ref != "" {
+			m.byRef[ref] = i
 		}
 	}
 	return m, nil
 }
 
-// LoadOrNewCollection rootDir/volume-collection.json 이 있으면 언마샬, 없으면 초기화 시킴.
+// LoadOrNewCollection now takes initial VolumeEntry objects, not VolumeIndex.
+func LoadOrNewCollection(rootDir string, initialEntries ...VolumeEntry) (*VolumeCollection, error) {
+	// 1) 컬렉션 파일 경로 준비
+	path := filepath.Join(rootDir, CollectionFileName)
+
+	// 2) 기존 파일 읽기 시도
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// 2-1) 파일이 없으면 새 컬렉션 생성 + 저장
+		if os.IsNotExist(err) {
+			coll := NewVolumeCollection(initialEntries...)
+			if err := saveCollection(rootDir, *coll); err != nil {
+				return nil, fmt.Errorf("failed to save new collection: %w", err)
+			}
+			return coll, nil
+		}
+		// 2-2) 그 외 I/O 에러
+		return nil, fmt.Errorf("read collection file: %w", err)
+	}
+
+	// 3) 파일이 존재하면 JSON 언마샬
+	var coll VolumeCollection
+	if err := json.Unmarshal(data, &coll); err != nil {
+		return nil, fmt.Errorf("unmarshal collection JSON: %w", err)
+	}
+	return &coll, nil
+}
+
+// LoadOrNewCollectionOld rootDir/volume-collection.json 이 있으면 언마샬, 없으면 초기화 시킴.
 // 만약 아무것도 없다면 그냥 LoadOrNewCollection("") 이렇게 사용하면 됨.
-func LoadOrNewCollection(rootDir string, initialVolumes ...VolumeIndex) (*VolumeCollection, error) {
+func LoadOrNewCollectionOld(rootDir string, initialVolumes ...VolumeIndex) (*VolumeCollection, error) {
 	// 1) 컬렉션 파일 경로 준비
 	path := filepath.Join(rootDir, CollectionFileName)
 
@@ -119,8 +162,18 @@ func LoadOrNewCollection(rootDir string, initialVolumes ...VolumeIndex) (*Volume
 	return &coll, nil
 }
 
+// NewVolumeCollection 이제 VolumeEntry 를 받습니다.
+func NewVolumeCollection(initialEntries ...VolumeEntry) *VolumeCollection {
+	coll := &VolumeCollection{
+		Version: 1,
+		Volumes: make([]VolumeEntry, len(initialEntries)),
+	}
+	copy(coll.Volumes, initialEntries)
+	return coll
+}
+
 // NewVolumeCollection 생성 시 초기 Version 을 1 로 설정
-func NewVolumeCollection(initialVolumes ...VolumeIndex) *VolumeCollection {
+func NewVolumeCollectionOld(initialVolumes ...VolumeIndex) *VolumeCollection {
 	coll := &VolumeCollection{
 		Version: 1,
 		Volumes: make([]VolumeIndex, len(initialVolumes)),
@@ -949,6 +1002,51 @@ func TarGzDir(fsDir, prefixPath string) ([]byte, error) {
 
 	// 5) Now buf contains a complete, deterministic .tar.gz
 	return buf.Bytes(), nil
+}
+
+// ValidateVolumeDir 폴더에 대해서 빈폴더이면 에러 리턴, 이때 숨김파일이 있으면, 로그를 남기고 오직 숨김파일만 있으면 에러 리턴,
+// 해당 폴더에 configblob.json 이 있는지 검사. 없으면 빈 configblob.json 을 만들어줌.
+func ValidateVolumeDir(volDir string) error {
+	info, err := os.Stat(volDir)
+	if err != nil {
+		return fmt.Errorf("volume dir %q does not exist: %w", volDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("volume path %q is not a directory", volDir)
+	}
+
+	entries, err := os.ReadDir(volDir)
+	if err != nil {
+		return fmt.Errorf("failed to read directory %q: %w", volDir, err)
+	}
+
+	// 숨김 파일(.으로 시작하는)만 로그로 남기고, non-hidden 항목만 카운트
+	visibleCount := 0
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			Log.Warnf("ValidateVolumeDir: hidden entry %q found in %s, skipping", name, volDir)
+			continue
+		}
+		visibleCount++
+	}
+	if visibleCount == 0 {
+		return fmt.Errorf("volume directory %q is empty (only hidden files present)", volDir)
+	}
+
+	// configblob.json 생성 여부 확인
+	cfgPath := filepath.Join(volDir, "configblob.json")
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		// 만약 configblob.json 이 없으면 로그를 남겨줌.
+		Log.Infof("ValidateVolumeDir: %q not found; creating a new empty configblob.json", cfgPath)
+		if err := os.WriteFile(cfgPath, []byte("{}"), fs.FileMode(0644)); err != nil {
+			return fmt.Errorf("failed to create %q: %w", cfgPath, err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("error checking %q: %w", cfgPath, err)
+	}
+
+	return nil
 }
 
 // 통합 메서드

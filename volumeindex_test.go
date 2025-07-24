@@ -325,3 +325,57 @@ func TestOciService(t *testing.T) {
 	_, err = vi.PublishVolume(context.Background(), volDir, "test.v1.0.0", configblob)
 
 }
+
+// TODO oci 폴더 권한 문제가 발생함. 이건 사전에 맞춰저야 한다.
+
+func TestOciService01(t *testing.T) {
+	conf, err := InitConfig("sori-oci.json")
+	if err != nil {
+		t.Fatalf("InitConfig failed: %v", err)
+	}
+
+	err = conf.EnsureDir()
+	if err != nil {
+		t.Fatalf("EnsureDir failed: %v", err)
+	}
+	// 전체적인 볼륨의 정보를 담고 있는 volume-collection.json 을 만들어줌.
+	cm, err := NewCollectionManager(conf.Local.Path)
+	if err != nil {
+		t.Fatalf("NewCollectionManager failed: %v", err)
+	}
+
+	// TODO
+	// 볼륨하나 만들어줌. TODO 여기서 volumeindex 포인터를 만들어 주는데 이거 재활용할 것인지 생각해야 함. 이것과 연관해서 validation 메서드 만들어줘야 함.
+	// validation 메서드는 해당 볼륨 폴더에서 configblob.json 이 있는지 확인해야 하고 없으면 빈 파일을 만들어 줘야 함.
+	// podbridge5 볼륨 메서드에서 사용할때, 필요한 메서드 만들어 줘야 함.
+	// displayName 같은 경우 중복성 검사를 않하고 있음. 해줄 필요가 있는지 생각해야 함. 이건 옵션으로 두어서 중복으로 저장할 경우는 옵션을 true 로 주면 중복으로 저장되게 하자.
+	// 볼륨 폴더가 빈 폴더면, 저장할 필요가 없음.
+	// 지금은 볼더만을 잡아주고 있는데, 파일, 압축파일 등도 할지 생각해봐야 함.
+	volDir := "./test-vol"
+
+	err = ValidateVolumeDir(volDir)
+	if err != nil {
+		t.Fatalf("ValidateVolumeDir failed: %v", err)
+	}
+
+	vi, err := GenerateVolumeIndex(volDir, "테스트 하는 볼륨")
+	if err != nil {
+		t.Fatalf("GenerateVolumeIndex failed: %v", err)
+	}
+	configblob, err := loadMetadataJSON("configblob.json")
+	if err != nil {
+		t.Fatalf(" failed to load configblob juson:%v", err)
+	}
+
+	newvi, err := vi.PublishVolume(context.Background(), volDir, "test.v1.0.0", configblob)
+
+	// 만들어준 볼륨을 cm 에 넣어줌. TODO pointer 로 쓸지 value 로 쓸지 결정하자. 지금 혼재되어 있음.
+	if newvi == nil {
+		t.Fatalf("PublishVolume returned nil VolumeIndex")
+	}
+
+	err = cm.AddOrUpdate(*newvi)
+	if err != nil {
+		t.Fatalf("AddOrUpdate failed: %v", err)
+	}
+}

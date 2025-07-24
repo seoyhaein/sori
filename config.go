@@ -110,7 +110,7 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// EnsureDir sori-oci.json 에 있는 path 에 실제 디렉토리가 있는지
+// EnsureDir sori-oci.json 에 있는 path 에 실제 디렉토리가 있는지, TODO 수정해줘야 함. 루트 권한의 폴더에 대해서는 에러 리턴함. 오류는 아님.
 func (conf *Config) EnsureDir() error {
 	// 방어적 코드
 	if conf == nil {
