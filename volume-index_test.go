@@ -450,3 +450,30 @@ func TestOciService01(t *testing.T) {
 		t.Fatalf("AddOrUpdate failed: %v", err)
 	}
 }
+
+func TestPublishVolumeFromDir_Success(t *testing.T) {
+	// 1) 설정 로드 및 로컬 디렉터리 준비
+	conf, err := InitConfig("sori-oci.json")
+	if err != nil {
+		t.Fatalf("InitConfig failed: %v", err)
+	}
+	if err := conf.EnsureDir(); err != nil {
+		t.Fatalf("EnsureDir failed: %v", err)
+	}
+
+	// 2) CollectionManager 생성
+	cm, err := NewCollectionManager(conf.Local.Path)
+	if err != nil {
+		t.Fatalf("NewCollectionManager failed: %v", err)
+	}
+
+	// 3) 실제 테스트할 볼륨 디렉터리와 파라미터
+	volDir := "./test-vol"     // 사전에 준비된 테스트용 디렉터리
+	displayName := "테스트 하는 볼륨" // 사용자 지정 이름
+	tag := "test.v1.0.0"       // 태그
+
+	// 4) 통합 메서드 호출
+	if err := cm.PublishVolumeFromDir(context.Background(), volDir, displayName, tag); err != nil {
+		t.Fatalf("PublishVolumeFromDir failed: %v", err)
+	}
+}

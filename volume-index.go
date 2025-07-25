@@ -220,6 +220,46 @@ func (m *CollectionManager) Flush() error {
 	return saveCollection(m.root, *m.coll)
 }
 
+func (m *CollectionManager) PublishVolumeFromDir(ctx context.Context, volDir, displayName, tag string) error {
+	// 1) 디렉토리 검증 및 configblob.json 로드/생성
+	rawConfig, err := ValidateVolumeDir(volDir)
+	if err != nil {
+		return fmt.Errorf("ValidateVolumeDir failed: %w", err)
+	}
+
+	// 2) raw JSON → ConfigBlob
+	var cb ConfigBlob
+	if err := json.Unmarshal(rawConfig, &cb); err != nil {
+		return fmt.Errorf("failed to parse configblob.json: %w", err)
+	}
+
+	// 3) VolumeIndex 생성
+	vi, err := GenerateVolumeIndex(volDir, displayName)
+	if err != nil {
+		return fmt.Errorf("GenerateVolumeIndex failed: %w", err)
+	}
+
+	// 4) OCI에 퍼블리시
+	newVi, err := vi.PublishVolume(ctx, volDir, tag, rawConfig)
+	if err != nil {
+		return fmt.Errorf("PublishVolume failed: %w", err)
+	}
+	if newVi == nil {
+		return fmt.Errorf("PublishVolume returned nil VolumeIndex")
+	}
+
+	// 5) 컬렉션에 추가
+	entry := VolumeEntry{
+		Index:      *newVi,
+		ConfigBlob: cb,
+	}
+	if err := m.AddOrUpdate(entry); err != nil {
+		return fmt.Errorf("AddOrUpdate failed: %w", err)
+	}
+
+	return nil
+}
+
 // loadMetadataJSON (위의) 임의의 json 파일을 읽어와서 []byte 로 변환, -> config blob 으로 채워짐.
 func loadMetadataJSON(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
@@ -997,46 +1037,6 @@ func ValidateVolumeDir(volDir string) ([]byte, error) {
 }
 
 // 통합 메서드
-
-func (m *CollectionManager) PublishVolumeFromDir(ctx context.Context, volDir, displayName, tag string) error {
-	// 1) 디렉토리 검증 및 configblob.json 로드/생성
-	rawConfig, err := ValidateVolumeDir(volDir)
-	if err != nil {
-		return fmt.Errorf("ValidateVolumeDir failed: %w", err)
-	}
-
-	// 2) raw JSON → ConfigBlob
-	var cb ConfigBlob
-	if err := json.Unmarshal(rawConfig, &cb); err != nil {
-		return fmt.Errorf("failed to parse configblob.json: %w", err)
-	}
-
-	// 3) VolumeIndex 생성
-	vi, err := GenerateVolumeIndex(volDir, displayName)
-	if err != nil {
-		return fmt.Errorf("GenerateVolumeIndex failed: %w", err)
-	}
-
-	// 4) OCI에 퍼블리시
-	newVi, err := vi.PublishVolume(ctx, volDir, tag, rawConfig)
-	if err != nil {
-		return fmt.Errorf("PublishVolume failed: %w", err)
-	}
-	if newVi == nil {
-		return fmt.Errorf("PublishVolume returned nil VolumeIndex")
-	}
-
-	// 5) 컬렉션에 추가
-	entry := VolumeEntry{
-		Index:      *newVi,
-		ConfigBlob: cb,
-	}
-	if err := m.AddOrUpdate(entry); err != nil {
-		return fmt.Errorf("AddOrUpdate failed: %w", err)
-	}
-
-	return nil
-}
 
 // TODO 파일 이름은 고정해두어야 할 거같은데 정하지 못했다.
 // TODO 이렇게 임의의 key, value 로 잡아 두도록 한다.
