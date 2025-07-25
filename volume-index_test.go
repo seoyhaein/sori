@@ -215,7 +215,7 @@ func TestExtractTarGz(t *testing.T) {
 	dirPath := filepath.Join(dest, "dir")
 	assert.DirExists(t, dirPath)
 
-	// 4) Verify file was created with correct content
+	// 4) Verify file was created with the correct content
 	filePath := filepath.Join(dirPath, "file.txt")
 	assert.FileExists(t, filePath)
 	got, err := os.ReadFile(filePath)

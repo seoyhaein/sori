@@ -822,7 +822,9 @@ func FetchVolParallel(ctx context.Context, destRoot, repo, tag string, concurren
 	return vi, nil
 }
 
-// UntarGzDir 는 gzip 스트림을 해제하여 dest 디렉터리에 tar 파일 내용을 풀어 준다. TODO filepath.clean 이거 다른 코드에도 적용해야 함. close 에러 처리 해야함. (시간날때 처리하자)
+// UntarGzDir 는 gzip 스트림을 해제하여 dest 디렉터리에 tar 파일 내용을 풀어 준다.
+// TODO filepath.clean 이거 다른 코드에도 적용해야 함. close 에러 처리 해야함. (시간날때 처리하자)
+// TODO 해당 메서드 살펴봐야 함.
 func UntarGzDir(gzipStream io.Reader, dest string) error {
 	// Initialize gzip reader
 	gz, err := gzip.NewReader(gzipStream)
