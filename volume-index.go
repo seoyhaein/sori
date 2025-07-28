@@ -414,6 +414,7 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 		return nil, fmt.Errorf("init OCI store: %w", err)
 	}
 
+	// TODO 이 메서드 따로 떼어내자. 확장성있게 만들자.
 	anyPushed := false
 	// helper: push blob if not exists, returns a pointer to bool pushed
 	pushIfNeeded := func(desc ocispec.Descriptor, r io.Reader) (*bool, error) {
