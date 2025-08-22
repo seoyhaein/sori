@@ -50,6 +50,7 @@ proto.Unmarshal(data, &m)
 - 생각하기에서 복원 및 백업, 버전 관리 등에 대한 메서드 개발 해야함.
 - 테스트 철저하기 진행하기 어느정도 완료한다음에 codex 활용
 - repo 이름 정하기 이거 config 파일에 넣어서 관리하는 것 생각하고 구현해야 함. 내부적으로 숨길 수 있도록 한다.
+- 파이프라인과 통합하고 코드 최적화 하고 정리해서 마무리 하는 방향으로 집중하자.  
 
 ### oras-go
 - https://github.com/oras-project/oras-go/blob/main/docs/tutorial/quickstart.md
@@ -84,4 +85,5 @@ proto.Unmarshal(data, &m)
 - 가장 취약한 데이터는 볼륨과 volume-collection.json 이다. 
 - 복원 할 수 있는 메서드들을 만들어 두어야 한다.
 - race 테스트 해야함. 그리고 lock unlcok 에 대해서 다른 메서드들도 필요한지 생각해야 함.
+
 
