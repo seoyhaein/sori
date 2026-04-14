@@ -1,6 +1,12 @@
 package sori
 
-import "testing"
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestLoadConfig(t *testing.T) {
 	conf, err := LoadConfig("sori-oci.json")
@@ -10,6 +16,9 @@ func TestLoadConfig(t *testing.T) {
 
 	err = conf.EnsureDir()
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skipf("skipping EnsureDir: no permission to create %q (run as root or set a writable path)", conf.Local.Path)
+		}
 		t.Fatalf("EnsureDir failed: %v", err)
 	}
 }
@@ -22,7 +31,42 @@ func TestInitConfig(t *testing.T) {
 
 	err = conf.EnsureDir()
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skipf("skipping EnsureDir: no permission to create %q (run as root or set a writable path)", conf.Local.Path)
+		}
 		t.Fatalf("EnsureDir failed: %v", err)
+	}
+}
+
+// TestLoadConfig_TempDir verifies LoadConfig+EnsureDir with a writable temp path.
+func TestLoadConfig_TempDir(t *testing.T) {
+	tmp := t.TempDir()
+	localPath := filepath.Join(tmp, "oci")
+
+	cfg := Config{
+		Local:   LocalStore{Type: "oci", Path: localPath},
+		Remotes: []RemoteStore{{Name: "test", Registry: "reg.example.com", Repository: "test/repo"}},
+	}
+	cfgPath := filepath.Join(tmp, "test-sori.json")
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+
+	conf, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if err := conf.EnsureDir(); err != nil {
+		t.Fatalf("EnsureDir failed: %v", err)
+	}
+
+	info, err := os.Stat(localPath)
+	if err != nil {
+		t.Fatalf("expected directory to exist: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("expected %q to be a directory", localPath)
 	}
 }
 

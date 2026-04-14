@@ -320,6 +320,9 @@ func (vc *VolumeCollection) RemoveVolume(idx int) error {
 
 // saveCollection: coll 을 rootDir/volume-collection.json 에 저장
 func saveCollection(rootDir string, coll VolumeCollection) error {
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		return fmt.Errorf("create collection dir %q: %w", rootDir, err)
+	}
 	path := filepath.Join(rootDir, CollectionJson)
 	data, err := json.MarshalIndent(coll, "", "  ")
 	if err != nil {
@@ -462,6 +465,9 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 			MediaType: ocispec.MediaTypeImageLayerGzip,
 			Digest:    digest.FromBytes(layerData),
 			Size:      int64(len(layerData)),
+			Annotations: map[string]string{
+				"org.example.partitionPath": rootBase,
+			},
 		}
 		pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
 		if err != nil {
@@ -483,6 +489,9 @@ func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName strin
 				MediaType: ocispec.MediaTypeImageLayerGzip,
 				Digest:    digest.FromBytes(layerData),
 				Size:      int64(len(layerData)),
+				Annotations: map[string]string{
+					"org.example.partitionPath": part.Path,
+				},
 			}
 			pushedPtr, err := pushIfNeeded(desc, bytes.NewReader(layerData))
 			if err != nil {

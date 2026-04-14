@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/stretchr/testify/assert"
 	"os"
@@ -458,6 +459,9 @@ func TestPublishVolumeFromDir_Success(t *testing.T) {
 		t.Fatalf("InitConfig failed: %v", err)
 	}
 	if err := conf.EnsureDir(); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skipf("skipping: no permission to create %q", conf.Local.Path)
+		}
 		t.Fatalf("EnsureDir failed: %v", err)
 	}
 
@@ -475,5 +479,51 @@ func TestPublishVolumeFromDir_Success(t *testing.T) {
 	// 4) 통합 메서드 호출
 	if err := cm.PublishVolumeFromDir(context.Background(), volDir, displayName, tag); err != nil {
 		t.Fatalf("PublishVolumeFromDir failed: %v", err)
+	}
+}
+
+// TestPublishFetchRoundTrip verifies that PublishVolume correctly sets the
+// partitionPath annotation so that FetchVolSeq can reconstruct the volume.
+func TestPublishFetchRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+
+	// Use the OCI store under tmp so we don't need root.
+	prevOCI := ociStore
+	ociStore = filepath.Join(tmp, "oci")
+	t.Cleanup(func() { ociStore = prevOCI })
+
+	volDir := "./test-vol"
+	tag := "roundtrip.v1.0.0"
+
+	// 1) Generate index and publish.
+	vi, err := GenerateVolumeIndex(volDir, "RoundTrip")
+	if err != nil {
+		t.Fatalf("GenerateVolumeIndex: %v", err)
+	}
+	configBlob := []byte("{}")
+	published, err := vi.PublishVolume(ctx, volDir, tag, configBlob)
+	if err != nil {
+		t.Fatalf("PublishVolume: %v", err)
+	}
+	if published.VolumeRef == "" {
+		t.Fatal("expected non-empty VolumeRef after publish")
+	}
+
+	// 2) Fetch back into a separate dest directory.
+	dest := filepath.Join(tmp, "restored")
+	fetched, err := FetchVolSeq(ctx, dest, ociStore, tag)
+	if err != nil {
+		t.Fatalf("FetchVolSeq: %v", err)
+	}
+
+	// 3) VolumeRef must match published digest.
+	if fetched.VolumeRef != published.VolumeRef {
+		t.Errorf("VolumeRef mismatch: published=%q, fetched=%q", published.VolumeRef, fetched.VolumeRef)
+	}
+
+	// 4) Partition count must match.
+	if len(fetched.Partitions) != len(published.Partitions) {
+		t.Errorf("partition count: published=%d, fetched=%d", len(published.Partitions), len(fetched.Partitions))
 	}
 }
