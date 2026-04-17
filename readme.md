@@ -415,4 +415,4 @@ root 권한이 없는 환경에서는 `TestLoadConfig` / `TestInitConfig`가 자
 
 ## 라이선스
 
-MIT
+Apache License 2.0
