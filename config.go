@@ -42,16 +42,20 @@ const (
 	defaultOCIStore             = "/var/lib/sori/oci"
 )
 
-var ociStore = defaultOCIStore
-
 func InitConfig(path string) (*Config, error) {
 	cfg, err := LoadConfig(path)
 	if err != nil {
 		return nil, err
 	}
-	ociStore = cfg.Local.Path
-	Log.Infof("oci store path: %s", ociStore)
+	Log.Infof("oci store path: %s", cfg.Local.Path)
 	return cfg, nil
+}
+
+func (conf *Config) NewClient(opts ...ClientOption) *Client {
+	allOpts := make([]ClientOption, 0, len(opts)+1)
+	allOpts = append(allOpts, WithLocalStorePath(conf.Local.Path))
+	allOpts = append(allOpts, opts...)
+	return NewClient(allOpts...)
 }
 
 // LoadConfig reads and unmarshals the JSON file.
@@ -59,23 +63,26 @@ func LoadConfig(path string) (*Config, error) {
 	// TODO 통일적으로 config 읽는 코드는 이런식으로 표준을 정하자.
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve path: %w", err)
+		return nil, transportError("LoadConfig", "resolve path", err)
 	}
 	// (방어 코드) TODO 심볼릭 링크로 들어왔을대 읽지 않고 에러 리턴함. 방어적 코드. 이거 다른 코드에도 적용하자.
 	fi, err := os.Lstat(abs) // 심볼릭 링크를 따라가지 않고 메타정보 조회
 	if err != nil {
-		return nil, fmt.Errorf("stat config: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, notFoundError("LoadConfig", fmt.Sprintf("config file not found: %s", abs), err)
+		}
+		return nil, transportError("LoadConfig", "stat config", err)
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("config is not a regular file: %s", abs)
+		return nil, validationError("LoadConfig", fmt.Sprintf("config is not a regular file: %s", abs), nil)
 	}
 
 	f, err := os.Open(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) { // 또는 fs.ErrNotExist
-			return nil, fmt.Errorf("config file not found: %s", abs)
+			return nil, notFoundError("LoadConfig", fmt.Sprintf("config file not found: %s", abs), err)
 		}
-		return nil, fmt.Errorf("open config: %w", err)
+		return nil, transportError("LoadConfig", "open config", err)
 	}
 
 	// TODO defer close 이렇게 하는 거 표준으로 정하자. 다른곳에서는 다소 다르게 하고 있는데.
@@ -87,20 +94,20 @@ func LoadConfig(path string) (*Config, error) {
 
 	var cfg Config
 	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("decode json: %w", err)
+		return nil, validationError("LoadConfig", "decode json", err)
 	}
 
 	// 유효성 검사 TODO 지금 이렇게 간단히 하지만, 별도의 메서드를 만들어서 configblob 도 확인해줘야 함.
 	if cfg.Local.Path == "" {
-		return nil, fmt.Errorf("local.path is empty")
+		return nil, validationError("LoadConfig", "local.path is empty", nil)
 	}
 
 	if cfg.Local.Type != "oci" {
-		return nil, fmt.Errorf("config error: local.type must be 'oci', but got '%s'", cfg.Local.Type)
+		return nil, validationError("LoadConfig", fmt.Sprintf("local.type must be 'oci', but got '%s'", cfg.Local.Type), nil)
 	}
 	for i, r := range cfg.Remotes {
 		if r.Name == "" || r.Registry == "" || r.Repository == "" {
-			return nil, fmt.Errorf("remotes[%d] missing required fields", i)
+			return nil, validationError("LoadConfig", fmt.Sprintf("remotes[%d] missing required fields", i), nil)
 		}
 	}
 
@@ -111,10 +118,10 @@ func LoadConfig(path string) (*Config, error) {
 func (conf *Config) EnsureDir() error {
 	// 방어적 코드
 	if conf == nil {
-		return errors.New("cannot ensure directory from a nil config")
+		return validationError("EnsureDir", "cannot ensure directory from a nil config", nil)
 	}
 	if conf.Local.Path == "" {
-		return errors.New("local.path is empty")
+		return validationError("EnsureDir", "local.path is empty", nil)
 	}
 	// 해당 디렉토리가 있으면 넘어감.
 	p := filepath.Clean(conf.Local.Path)
@@ -124,15 +131,15 @@ func (conf *Config) EnsureDir() error {
 			Log.Infof("%s is ready", p)
 			return nil
 		}
-		return fmt.Errorf("path '%s' already exists but is not a directory", p)
+		return validationError("EnsureDir", fmt.Sprintf("path '%s' already exists but is not a directory", p), nil)
 	}
 	// 해당 디렉토리가 없으면 만들어줌. /var/lib/sori/oci 여기를 디폴트로 잡아주긴 하는데 이건 루트 사용자만 만들 수 있다.
 	if errors.Is(err, os.ErrNotExist) {
 		if mkdirErr := os.MkdirAll(p, defaultDirPerm); mkdirErr != nil {
-			return fmt.Errorf("failed to create directory '%s': %w", p, mkdirErr)
+			return transportError("EnsureDir", fmt.Sprintf("create directory '%s'", p), mkdirErr)
 		}
 		Log.Infof("Created directory: %s", p)
 		return nil
 	}
-	return fmt.Errorf("failed to check directory '%s': %w", p, err)
+	return transportError("EnsureDir", fmt.Sprintf("check directory '%s'", p), err)
 }

@@ -14,16 +14,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+	"github.com/seoyhaein/sori/registryutil"
 	"strings"
 
 	godigest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	orasoras "oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/oci"
-	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
-	"oras.land/oras-go/v2/registry/remote/retry"
 )
 
 const (
@@ -69,24 +67,26 @@ func PushDataSpecReferrer(ctx context.Context, target ReferrerTarget, subjectDig
 // NewReferrerLocalStore opens (or creates) an OCI layout store at the given path.
 // Useful for local testing without a running registry.
 func NewReferrerLocalStore(path string) (ReferrerTarget, error) {
-	return oci.New(path)
+	store, err := oci.New(path)
+	if err != nil {
+		return nil, transportError("NewReferrerLocalStore", "open OCI layout store", err)
+	}
+	return store, nil
 }
 
 // NewReferrerRemoteRepository creates a remote.Repository pointed at repoRef.
 // If plainHTTP is true, HTTP is used instead of HTTPS.
 // credential may be nil for anonymous access.
 func NewReferrerRemoteRepository(repoRef string, plainHTTP bool, credential *auth.Credential) (ReferrerTarget, error) {
-	repo, err := remote.NewRepository(repoRef)
-	if err != nil {
-		return nil, fmt.Errorf("sori: new repository %q: %w", repoRef, err)
-	}
-	repo.PlainHTTP = plainHTTP
+	cfg := registryutil.RemoteConfig{PlainHTTP: plainHTTP}
 	if credential != nil {
-		repo.Client = &auth.Client{
-			Client:     retry.DefaultClient,
-			Cache:      auth.NewCache(),
-			Credential: auth.StaticCredential(repo.Reference.Registry, *credential),
-		}
+		cfg.Username = credential.Username
+		cfg.Password = credential.Password
+		cfg.Token = credential.AccessToken
+	}
+	repo, err := registryutil.NewRepository(repoRef, cfg)
+	if err != nil {
+		return nil, transportError("NewReferrerRemoteRepository", "create remote repository "+repoRef, err)
 	}
 	return repo, nil
 }
@@ -95,7 +95,7 @@ func NewReferrerRemoteRepository(repoRef string, plainHTTP bool, credential *aut
 func MarshalSpec(v interface{}) ([]byte, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		return nil, fmt.Errorf("sori: marshal spec: %w", err)
+		return nil, transportError("MarshalSpec", "marshal spec JSON", err)
 	}
 	return data, nil
 }
@@ -110,10 +110,10 @@ func pushSpecReferrer(
 	mediaType string,
 ) (SpecReferrerResult, error) {
 	if subjectDigest == "" {
-		return SpecReferrerResult{}, fmt.Errorf("sori: subjectDigest must not be empty")
+		return SpecReferrerResult{}, validationError("pushSpecReferrer", "subjectDigest must not be empty", nil)
 	}
 	if len(specJSON) == 0 {
-		return SpecReferrerResult{}, fmt.Errorf("sori: specJSON must not be empty")
+		return SpecReferrerResult{}, validationError("pushSpecReferrer", "specJSON must not be empty", nil)
 	}
 
 	// 1. Config blob = specJSON (payload는 config에 담는 ORAS referrer 관례)
@@ -123,7 +123,7 @@ func pushSpecReferrer(
 		Size:      int64(len(specJSON)),
 	}
 	if err := pushBlobIfAbsent(ctx, target, configDesc, specJSON); err != nil {
-		return SpecReferrerResult{}, fmt.Errorf("sori: push config blob: %w", err)
+		return SpecReferrerResult{}, transportError("pushSpecReferrer", "push config blob", err)
 	}
 
 	// 2. Empty layers — referrer artifact carries payload in config
@@ -145,7 +145,7 @@ func pushSpecReferrer(
 		},
 	)
 	if err != nil {
-		return SpecReferrerResult{}, fmt.Errorf("sori: pack referrer manifest: %w", err)
+		return SpecReferrerResult{}, transportError("pushSpecReferrer", "pack referrer manifest", err)
 	}
 
 	return SpecReferrerResult{

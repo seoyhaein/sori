@@ -3,6 +3,7 @@ package sori_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -107,8 +108,8 @@ func TestPushToolSpecReferrer_EmptySubjectDigest(t *testing.T) {
 	store := newTestOCIStore(t)
 	specJSON, _ := sori.MarshalSpec(map[string]string{"k": "v"})
 	_, err := sori.PushToolSpecReferrer(ctx, store, "", specJSON)
-	if err == nil {
-		t.Fatal("expected error for empty subjectDigest")
+	if !errors.Is(err, sori.ErrValidation) {
+		t.Fatalf("expected ErrValidation for empty subjectDigest, got %v", err)
 	}
 }
 
@@ -116,8 +117,8 @@ func TestPushToolSpecReferrer_EmptySpecJSON(t *testing.T) {
 	ctx := context.Background()
 	store := newTestOCIStore(t)
 	_, err := sori.PushToolSpecReferrer(ctx, store, "sha256:aaaa", nil)
-	if err == nil {
-		t.Fatal("expected error for empty specJSON")
+	if !errors.Is(err, sori.ErrValidation) {
+		t.Fatalf("expected ErrValidation for empty specJSON, got %v", err)
 	}
 }
 
@@ -207,5 +208,12 @@ func TestNewReferrerLocalStore_PushReferrer(t *testing.T) {
 	}
 	if result.ReferrerDigest == "" {
 		t.Error("ReferrerDigest must not be empty")
+	}
+}
+
+func TestNewReferrerRemoteRepository_InvalidReferenceTypedError(t *testing.T) {
+	_, err := sori.NewReferrerRemoteRepository("not a valid reference", false, nil)
+	if !errors.Is(err, sori.ErrTransport) {
+		t.Fatalf("expected ErrTransport, got %v", err)
 	}
 }

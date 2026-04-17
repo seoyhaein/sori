@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
+	"oras.land/oras-go/v2/content/oci"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,8 +31,13 @@ func TestGenerateAndSaveVolumeIndex(t *testing.T) {
 }
 
 func TestPublishVolumeOther(t *testing.T) {
-
 	volDir := "./test2"
+	if _, err := os.Stat(volDir); err != nil {
+		t.Skipf("skipping: fixture %q not available", volDir)
+	}
+	if _, err := os.Stat("configblob1.json"); err != nil {
+		t.Skip("skipping: configblob1.json fixture not available")
+	}
 	vi, err := GenerateVolumeIndex(volDir, "테스트 하는 볼륨2")
 	if err != nil {
 		t.Fatalf("GenerateVolumeIndex failed: %v", err)
@@ -47,6 +54,12 @@ func TestPublishVolumeOther(t *testing.T) {
 func TestPublishVolumeOther1(t *testing.T) {
 	// 동일한 것을 넣으면 어떻게 될까?
 	volDir := "./test2"
+	if _, err := os.Stat(volDir); err != nil {
+		t.Skipf("skipping: fixture %q not available", volDir)
+	}
+	if _, err := os.Stat("configblob1.json"); err != nil {
+		t.Skip("skipping: configblob1.json fixture not available")
+	}
 	vi, err := GenerateVolumeIndex(volDir, "테스트 하는 볼륨2")
 	if err != nil {
 		t.Fatalf("GenerateVolumeIndex failed: %v", err)
@@ -85,8 +98,14 @@ func TestFetchVolumeFromOCI(t *testing.T) {
 
 	repo := "./repo"
 	dest := "./test-vol-restored"
+	if _, err := os.Stat(repo); err != nil {
+		t.Skipf("skipping: local OCI fixture %q not available", repo)
+	}
 	_, err := FetchVolSeq(ctx, dest, repo, "v1.0.0")
 	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			t.Skipf("skipping: expected tag not prepared in %q", repo)
+		}
 		t.Fatalf("FetchVolSeq failed: %v", err)
 	}
 
@@ -94,6 +113,9 @@ func TestFetchVolumeFromOCI(t *testing.T) {
 
 // TestPushLocalToRemote_Harbor 실제 Harbor 레지스트리에 푸시
 func TestPushLocalToRemote_Harbor(t *testing.T) {
+	if os.Getenv("SORI_RUN_HARBOR_TESTS") == "" {
+		t.Skip("skipping Harbor push test; set SORI_RUN_HARBOR_TESTS=1 to enable")
+	}
 	ctx := context.Background()
 
 	localTag := "test.v1.0.0"
@@ -103,7 +125,7 @@ func TestPushLocalToRemote_Harbor(t *testing.T) {
 	repo := "./repo"
 
 	// 5) 실제 푸시 호출
-	if err := PushLocalToRemote(ctx, repo, localTag, remoteRepo, user, pass, true); err != nil {
+	if _, err := PushLocalToRemote(ctx, repo, localTag, remoteRepo, user, pass, true); err != nil {
 		t.Fatalf("Harbor 레지스트리 푸시 실패: %v", err)
 	}
 
@@ -236,7 +258,7 @@ func TestExtractTarGz(t *testing.T) {
 
 // TODO 여기서 부터 검증해 나가자.
 func TestLoadOrNewCollection_New(t *testing.T) {
-	rootDir := "./testRoot"
+	rootDir := t.TempDir()
 	_, err := LoadOrNewCollection(rootDir)
 	if err != nil {
 		t.Fatalf("LoadOrNewCollection failed: %v", err)
@@ -244,7 +266,7 @@ func TestLoadOrNewCollection_New(t *testing.T) {
 }
 
 func TestManager(t *testing.T) {
-	rootDir := "./testRoot"
+	rootDir := t.TempDir()
 	// 1. 매니저 초기화 (기존 파일 있으면 로드, 없으면 새로 생성)
 	manager, err := NewCollectionManager(rootDir)
 	if err != nil {
@@ -322,6 +344,9 @@ func TestValidateVolumeDir_NonExistent(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("expected error for non-existent directory, got %v", err)
 	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
 }
 
 func TestValidateVolumeDir_NotDirectory(t *testing.T) {
@@ -335,6 +360,9 @@ func TestValidateVolumeDir_NotDirectory(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
 		t.Fatalf("expected error for path that is not a directory, got %v", err)
 	}
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
 }
 
 func TestValidateVolumeDir_EmptyDir(t *testing.T) {
@@ -343,6 +371,25 @@ func TestValidateVolumeDir_EmptyDir(t *testing.T) {
 	_, err := ValidateVolumeDir(tmp)
 	if err == nil || !strings.Contains(err.Error(), "is empty") {
 		t.Fatalf("expected error for empty directory, got %v", err)
+	}
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
+
+func TestValidateVolumeDir_ConfigOnlyDir(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, ConfigBlobJson)
+	if err := os.WriteFile(cfgPath, []byte(`{"key":"value"}`), 0644); err != nil {
+		t.Fatalf("failed to write configblob.json: %v", err)
+	}
+
+	_, err := ValidateVolumeDir(tmp)
+	if err == nil || !strings.Contains(err.Error(), "is empty") {
+		t.Fatalf("expected empty-dir error when only configblob.json exists, got %v", err)
+	}
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
 	}
 }
 
@@ -406,6 +453,9 @@ func TestOciService01(t *testing.T) {
 
 	err = conf.EnsureDir()
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			t.Skipf("skipping: no permission to create %q", conf.Local.Path)
+		}
 		t.Fatalf("EnsureDir failed: %v", err)
 	}
 	// 전체적인 볼륨의 정보를 담고 있는 volume-collection.json 을 만들어줌.
@@ -482,16 +532,38 @@ func TestPublishVolumeFromDir_Success(t *testing.T) {
 	}
 }
 
+func TestPublishVolumeFromDir_InvalidConfigBlobTypedError(t *testing.T) {
+	rootDir := t.TempDir()
+	volDir := filepath.Join(rootDir, "vol")
+	if err := os.MkdirAll(volDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(volDir, "data.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("WriteFile data.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(volDir, ConfigBlobJson), []byte("{invalid"), 0o644); err != nil {
+		t.Fatalf("WriteFile configblob.json: %v", err)
+	}
+
+	cm, err := NewCollectionManager(filepath.Join(rootDir, "store"))
+	if err != nil {
+		t.Fatalf("NewCollectionManager: %v", err)
+	}
+
+	err = cm.PublishVolumeFromDir(context.Background(), volDir, "Broken Volume", "broken.v1")
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
+
 // TestPublishFetchRoundTrip verifies that PublishVolume correctly sets the
 // partitionPath annotation so that FetchVolSeq can reconstruct the volume.
 func TestPublishFetchRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 
-	// Use the OCI store under tmp so we don't need root.
-	prevOCI := ociStore
-	ociStore = filepath.Join(tmp, "oci")
-	t.Cleanup(func() { ociStore = prevOCI })
+	storePath := filepath.Join(tmp, "oci")
+	client := NewClient(WithLocalStorePath(storePath))
 
 	volDir := "./test-vol"
 	tag := "roundtrip.v1.0.0"
@@ -502,7 +574,7 @@ func TestPublishFetchRoundTrip(t *testing.T) {
 		t.Fatalf("GenerateVolumeIndex: %v", err)
 	}
 	configBlob := []byte("{}")
-	published, err := vi.PublishVolume(ctx, volDir, tag, configBlob)
+	published, err := client.PublishVolume(ctx, vi, volDir, tag, configBlob)
 	if err != nil {
 		t.Fatalf("PublishVolume: %v", err)
 	}
@@ -512,7 +584,7 @@ func TestPublishFetchRoundTrip(t *testing.T) {
 
 	// 2) Fetch back into a separate dest directory.
 	dest := filepath.Join(tmp, "restored")
-	fetched, err := FetchVolSeq(ctx, dest, ociStore, tag)
+	fetched, err := client.FetchVolumeSequential(ctx, dest, storePath, tag)
 	if err != nil {
 		t.Fatalf("FetchVolSeq: %v", err)
 	}
@@ -525,5 +597,263 @@ func TestPublishFetchRoundTrip(t *testing.T) {
 	// 4) Partition count must match.
 	if len(fetched.Partitions) != len(published.Partitions) {
 		t.Errorf("partition count: published=%d, fetched=%d", len(published.Partitions), len(fetched.Partitions))
+	}
+
+	// 5) Files should be restored exactly once under destRoot.
+	restoredFile := filepath.Join(dest, "test-vol", "docs", "test111", "test.txt")
+	if _, err := os.Stat(restoredFile); err != nil {
+		t.Fatalf("expected restored file %q: %v", restoredFile, err)
+	}
+
+	duplicatedPath := filepath.Join(dest, "test-vol", "docs", "test-vol")
+	if _, err := os.Stat(duplicatedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected nested restore path %q exists", duplicatedPath)
+	}
+}
+
+func TestPackageVolumeToStore(t *testing.T) {
+	ctx := context.Background()
+	storePath := filepath.Join(t.TempDir(), "oci")
+
+	req := PackageRequest{
+		SourceDir:   "./test-vol",
+		DisplayName: "Packaged Volume",
+		Tag:         "pkg.v1.0.0",
+		Dataset:     "hg38",
+		Version:     "v1",
+		Description: "test package",
+		Annotations: map[string]string{"env": "test"},
+	}
+
+	pkg, err := PackageVolumeToStore(ctx, storePath, req)
+	if err != nil {
+		t.Fatalf("PackageVolumeToStore: %v", err)
+	}
+
+	if pkg.LocalTag != req.Tag {
+		t.Fatalf("LocalTag mismatch: got %q want %q", pkg.LocalTag, req.Tag)
+	}
+	if pkg.StableRef != "hg38:v1" {
+		t.Fatalf("StableRef mismatch: got %q", pkg.StableRef)
+	}
+	if pkg.ManifestDigest == "" || pkg.ConfigDigest == "" {
+		t.Fatalf("expected non-empty digests, got manifest=%q config=%q", pkg.ManifestDigest, pkg.ConfigDigest)
+	}
+	if pkg.TotalSize <= 0 {
+		t.Fatalf("expected positive total size, got %d", pkg.TotalSize)
+	}
+	if len(pkg.Partitions) == 0 {
+		t.Fatal("expected partitions to be populated")
+	}
+	if pkg.VolumeIndex.VolumeRef != pkg.ManifestDigest {
+		t.Fatalf("VolumeIndex.VolumeRef mismatch: got %q want %q", pkg.VolumeIndex.VolumeRef, pkg.ManifestDigest)
+	}
+}
+
+func TestClientPackageVolumeWithOptions_InvalidConfigBlob(t *testing.T) {
+	client := NewClient(WithLocalStorePath(t.TempDir()))
+	_, err := client.PackageVolumeWithOptions(context.Background(), PackageRequest{
+		SourceDir:   "./test-vol",
+		DisplayName: "Packaged Volume",
+		Tag:         "pkg.v1.0.0",
+	}, PackageOptions{
+		ConfigBlob: []byte("{invalid"),
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
+
+func TestClientPackageVolumeWithOptions_RequireConfigBlob(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "data.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("write data file: %v", err)
+	}
+	client := NewClient(WithLocalStorePath(t.TempDir()))
+	_, err := client.PackageVolumeWithOptions(context.Background(), PackageRequest{
+		SourceDir:   tmp,
+		DisplayName: "Packaged Volume",
+		Tag:         "pkg.v1.0.0",
+	}, PackageOptions{
+		RequireConfigBlob: true,
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("expected ErrValidation, got %v", err)
+	}
+}
+
+func TestClientFetchVolume_RequireEmptyDestination(t *testing.T) {
+	dest := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dest, "existing.txt"), []byte("content"), 0644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	client := NewClient()
+	_, err := client.FetchVolume(context.Background(), dest, "./repo", "v1.0.0", FetchOptions{
+		Concurrency:             1,
+		RequireEmptyDestination: true,
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+}
+
+func TestBuildDataSpec(t *testing.T) {
+	req := PackageRequest{
+		SourceDir:   "./test-vol",
+		DisplayName: "HumanRef GRCh38",
+		Tag:         "hg38.v1",
+		Dataset:     "hg38",
+		Version:     "2026.04",
+		Description: "reference genome",
+		Annotations: map[string]string{"organism": "human"},
+	}
+	pkg := &PackageResult{
+		StableRef:      "hg38:2026.04",
+		LocalTag:       "hg38.v1",
+		ManifestDigest: "sha256:manifest",
+		ConfigDigest:   "sha256:config",
+		TotalSize:      1234,
+		CreatedAt:      "2026-04-17T00:00:00Z",
+		Partitions: []Partition{
+			{Name: "docs", Path: "test-vol/docs", ManifestRef: "sha256:layer"},
+		},
+	}
+	push := &PushResult{
+		Reference:      "harbor.example/data/hg38:2026.04",
+		Repository:     "harbor.example/data/hg38",
+		Tag:            "2026.04",
+		ManifestDigest: "sha256:remote",
+	}
+
+	spec, err := BuildDataSpec(pkg, push, req)
+	if err != nil {
+		t.Fatalf("BuildDataSpec: %v", err)
+	}
+
+	if spec.Identity.StableRef != pkg.StableRef {
+		t.Fatalf("StableRef mismatch: got %q want %q", spec.Identity.StableRef, pkg.StableRef)
+	}
+	if spec.Data.Repository != push.Repository || spec.Data.Reference != push.Reference {
+		t.Fatalf("push metadata mismatch: %+v", spec.Data)
+	}
+	if spec.Data.ManifestDigest != push.ManifestDigest {
+		t.Fatalf("manifest digest mismatch: got %q want %q", spec.Data.ManifestDigest, push.ManifestDigest)
+	}
+	if spec.Display.Name != req.DisplayName || spec.Display.Description != req.Description {
+		t.Fatalf("display metadata mismatch: %+v", spec.Display)
+	}
+	if spec.Provenance.SourceDir != req.SourceDir || spec.Provenance.LocalTag != pkg.LocalTag {
+		t.Fatalf("provenance mismatch: %+v", spec.Provenance)
+	}
+}
+
+func TestPushDataSpecManifest(t *testing.T) {
+	ctx := context.Background()
+	storePath := filepath.Join(t.TempDir(), "oci")
+
+	req := PackageRequest{
+		SourceDir:   "./test-vol",
+		DisplayName: "Packaged Volume",
+		Tag:         "pkg.v1.0.0",
+		Dataset:     "hg38",
+		Version:     "v1",
+	}
+	pkg, err := PackageVolumeToStore(ctx, storePath, req)
+	if err != nil {
+		t.Fatalf("PackageVolumeToStore: %v", err)
+	}
+	spec, err := BuildDataSpec(pkg, nil, req)
+	if err != nil {
+		t.Fatalf("BuildDataSpec: %v", err)
+	}
+
+	store, err := oci.New(storePath)
+	if err != nil {
+		t.Fatalf("oci.New: %v", err)
+	}
+	subjectDesc, err := store.Resolve(ctx, req.Tag)
+	if err != nil {
+		t.Fatalf("Resolve subject: %v", err)
+	}
+
+	result, err := pushDataSpecManifest(ctx, store, subjectDesc, spec)
+	if err != nil {
+		t.Fatalf("pushDataSpecManifest: %v", err)
+	}
+	if result.SubjectDigest != subjectDesc.Digest.String() {
+		t.Fatalf("subject digest mismatch: got %q want %q", result.SubjectDigest, subjectDesc.Digest)
+	}
+	if result.ManifestDigest == "" || result.ConfigDigest == "" {
+		t.Fatalf("expected non-empty referrer digests: %+v", result)
+	}
+
+	predecessors, err := store.Predecessors(ctx, subjectDesc)
+	if err != nil {
+		t.Fatalf("Predecessors: %v", err)
+	}
+	if len(predecessors) == 0 {
+		t.Fatal("expected at least one referrer predecessor")
+	}
+
+	var found ocispec.Descriptor
+	for _, pred := range predecessors {
+		if pred.Digest.String() == result.ManifestDigest {
+			found = pred
+			break
+		}
+	}
+	if found.Digest == "" {
+		t.Fatalf("expected predecessor %q not found", result.ManifestDigest)
+	}
+
+	rc, err := store.Fetch(ctx, found)
+	if err != nil {
+		t.Fatalf("Fetch referrer manifest: %v", err)
+	}
+	defer rc.Close()
+
+	var manifest ocispec.Manifest
+	if err := json.NewDecoder(rc).Decode(&manifest); err != nil {
+		t.Fatalf("decode referrer manifest: %v", err)
+	}
+	if manifest.Subject == nil || manifest.Subject.Digest != subjectDesc.Digest {
+		t.Fatalf("unexpected subject in manifest: %+v", manifest.Subject)
+	}
+	if manifest.Config.Digest.String() != result.ConfigDigest {
+		t.Fatalf("config digest mismatch: got %q want %q", manifest.Config.Digest, result.ConfigDigest)
+	}
+	if manifest.Config.MediaType != DataSpecMediaType {
+		t.Fatalf("unexpected config media type: %q", manifest.Config.MediaType)
+	}
+}
+
+func TestUntarGzDir_RejectsPathTraversal(t *testing.T) {
+	buf := &bytes.Buffer{}
+	gw := gzip.NewWriter(buf)
+	tw := tar.NewWriter(gw)
+
+	content := []byte("escape")
+	hdr := &tar.Header{
+		Name:     "../escape.txt",
+		Typeflag: tar.TypeReg,
+		Mode:     0644,
+		Size:     int64(len(content)),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("WriteHeader failed: %v", err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close failed: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close failed: %v", err)
+	}
+
+	err := UntarGzDir(bytes.NewReader(buf.Bytes()), t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "escapes destination") {
+		t.Fatalf("expected path traversal error, got %v", err)
 	}
 }
