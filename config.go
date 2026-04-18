@@ -42,6 +42,8 @@ const (
 	defaultOCIStore             = "/var/lib/sori/oci"
 )
 
+// Deprecated: use LoadConfig followed by Config.NewClient so new code stays on
+// the preferred client-based core path.
 func InitConfig(path string) (*Config, error) {
 	cfg, err := LoadConfig(path)
 	if err != nil {
@@ -51,6 +53,7 @@ func InitConfig(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// NewClient constructs the preferred core client path from configuration.
 func (conf *Config) NewClient(opts ...ClientOption) *Client {
 	allOpts := make([]ClientOption, 0, len(opts)+1)
 	allOpts = append(allOpts, WithLocalStorePath(conf.Local.Path))
@@ -58,7 +61,8 @@ func (conf *Config) NewClient(opts ...ClientOption) *Client {
 	return NewClient(allOpts...)
 }
 
-// LoadConfig reads and unmarshals the JSON file.
+// LoadConfig reads and validates the JSON configuration file used by the
+// preferred core client path.
 func LoadConfig(path string) (*Config, error) {
 	// TODO 통일적으로 config 읽는 코드는 이런식으로 표준을 정하자.
 	abs, err := filepath.Abs(path)

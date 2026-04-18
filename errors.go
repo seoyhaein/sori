@@ -5,6 +5,7 @@ import (
 	"fmt"
 )
 
+// ErrorKind classifies exported core errors returned by the root package.
 type ErrorKind string
 
 const (
@@ -16,6 +17,7 @@ const (
 	KindAuth       ErrorKind = "auth"
 )
 
+// Error is the structured error type behind the exported core error sentinels.
 type Error struct {
 	Kind    ErrorKind
 	Op      string
@@ -60,12 +62,18 @@ func (e *Error) Is(target error) bool {
 }
 
 var (
+	// ErrValidation marks validation failures on the exported core error path.
 	ErrValidation = &Error{Kind: KindValidation}
-	ErrNotFound   = &Error{Kind: KindNotFound}
-	ErrConflict   = &Error{Kind: KindConflict}
-	ErrIntegrity  = &Error{Kind: KindIntegrity}
-	ErrTransport  = &Error{Kind: KindTransport}
-	ErrAuth       = &Error{Kind: KindAuth}
+	// ErrNotFound marks missing-resource failures on the exported core error path.
+	ErrNotFound = &Error{Kind: KindNotFound}
+	// ErrConflict marks state conflicts on the exported core error path.
+	ErrConflict = &Error{Kind: KindConflict}
+	// ErrIntegrity marks integrity or decode failures on the exported core error path.
+	ErrIntegrity = &Error{Kind: KindIntegrity}
+	// ErrTransport marks IO, network, or remote-transport failures on the exported core error path.
+	ErrTransport = &Error{Kind: KindTransport}
+	// ErrAuth marks authentication and authorization failures on the exported core error path.
+	ErrAuth = &Error{Kind: KindAuth}
 )
 
 func newError(kind ErrorKind, op, message string, err error) error {

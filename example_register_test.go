@@ -2,6 +2,8 @@ package sori
 
 import "fmt"
 
+// ExampleBuildRegisteredDataDefinition demonstrates the current experimental
+// registration helper layered on top of the core packaging result.
 func ExampleBuildRegisteredDataDefinition() {
 	pkg := &PackageResult{
 		LocalTag:       "dataset.v1",

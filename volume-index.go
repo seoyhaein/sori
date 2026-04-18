@@ -7,13 +7,16 @@ import (
 	"sync"
 
 	"github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/seoyhaein/sori/registryutil"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 )
 
 type (
+	// Partition describes one partition entry inside the packaged dataset.
+	//
+	// Partition is part of the preferred core path because it is used by the
+	// core packaging, push, and fetch results.
 	Partition struct {
 		Name        string `json:"name"`
 		Path        string `json:"path"`
@@ -21,6 +24,10 @@ type (
 		CreatedAt   string `json:"created_at"`
 		Compression string `json:"compression"`
 	}
+	// VolumeIndex describes the partition layout of a packaged dataset.
+	//
+	// VolumeIndex is part of the core candidate surface and is used by the
+	// preferred client path as well as compatibility helpers.
 	VolumeIndex struct {
 		VolumeRef   string      `json:"volume_ref"`
 		DisplayName string      `json:"display_name"`
@@ -42,6 +49,10 @@ type (
 		coll  *VolumeCollection
 		byRef map[string]int
 	}
+	// PackageRequest is the input to the preferred core packaging path.
+	//
+	// This request type is intended to remain part of the long-lived core
+	// surface used by Client.PackageVolume and PackageVolumeToStore.
 	PackageRequest struct {
 		SourceDir   string            `json:"source_dir"`
 		DisplayName string            `json:"display_name"`
@@ -53,6 +64,10 @@ type (
 		Annotations map[string]string `json:"annotations,omitempty"`
 		ConfigBlob  []byte            `json:"-"`
 	}
+	// PackageResult is the output of the preferred core packaging path.
+	//
+	// This result type is part of the stable core candidate surface used by the
+	// client, metadata builder, and remote push flow.
 	PackageResult struct {
 		StableRef      string      `json:"stable_ref"`
 		LocalTag       string      `json:"local_tag"`
@@ -63,6 +78,11 @@ type (
 		Partitions     []Partition `json:"partitions"`
 		VolumeIndex    VolumeIndex `json:"volume_index"`
 	}
+	// RemoteTarget describes how the preferred core push path should reach a
+	// remote OCI registry.
+	//
+	// This type is part of the intended long-lived core surface used by
+	// PushPackagedVolume and Client.PushPackagedVolume.
 	RemoteTarget struct {
 		Registry            string              `json:"registry"`
 		Repository          string              `json:"repository"`
@@ -77,62 +97,32 @@ type (
 		AuthProvider        auth.CredentialFunc `json:"-"`
 		ReferrersCapability *bool               `json:"-"`
 	}
+	// PushResult reports the remote artifact identity returned by the preferred
+	// core push path.
+	//
+	// This result type is part of the stable core candidate surface.
 	PushResult struct {
 		Reference      string `json:"reference"`
 		Repository     string `json:"repository"`
 		Tag            string `json:"tag"`
 		ManifestDigest string `json:"manifest_digest"`
 	}
-	ReferrerPushResult struct {
-		SubjectDigest  string `json:"subject_digest"`
-		ManifestDigest string `json:"manifest_digest"`
-		ConfigDigest   string `json:"config_digest"`
-		Repository     string `json:"repository"`
-		ArtifactType   string `json:"artifact_type"`
-	}
-	DataSpec struct {
-		Identity   DataIdentity   `json:"identity"`
-		Data       DataSection    `json:"data"`
-		Display    DataDisplay    `json:"display"`
-		Provenance DataProvenance `json:"provenance"`
-	}
-	DataIdentity struct {
-		StableRef string `json:"stableRef"`
-		Dataset   string `json:"dataset,omitempty"`
-		Version   string `json:"version,omitempty"`
-	}
-	DataSection struct {
-		ArtifactType   string      `json:"artifactType"`
-		Repository     string      `json:"repository,omitempty"`
-		Reference      string      `json:"reference,omitempty"`
-		ManifestDigest string      `json:"manifestDigest,omitempty"`
-		ConfigDigest   string      `json:"configDigest"`
-		TotalSize      int64       `json:"totalSize"`
-		Partitions     []Partition `json:"partitions"`
-	}
-	DataDisplay struct {
-		Name        string            `json:"name"`
-		Description string            `json:"description,omitempty"`
-		Annotations map[string]string `json:"annotations,omitempty"`
-	}
-	DataProvenance struct {
-		PackagedAt string `json:"packagedAt"`
-		SourceDir  string `json:"sourceDir"`
-		LocalTag   string `json:"localTag"`
-	}
 )
 
 const (
-	ConfigBlobJson    = "configblob.json"
-	CollectionJson    = "volume-collection.json"
-	VolumeIndexJson   = "volume-index.json"
-	DataSpecMediaType = "application/vnd.nodevault.dataspec.v1+json"
+	ConfigBlobJson  = "configblob.json"
+	CollectionJson  = "volume-collection.json"
+	VolumeIndexJson = "volume-index.json"
 )
 
+// Deprecated: prefer Config.NewClient followed by Client.PackageVolume or
+// Client.PackageVolumeWithOptions so new code stays on the preferred core path.
 func PackageVolume(ctx context.Context, req PackageRequest) (*PackageResult, error) {
 	return NewClient().PackageVolume(ctx, req)
 }
 
+// PackageVolumeToStore packages a dataset into the given local OCI store using
+// the preferred core packaging contract.
 func PackageVolumeToStore(ctx context.Context, localStorePath string, req PackageRequest) (*PackageResult, error) {
 	return packageVolumeToStoreWithOptions(ctx, localStorePath, req, PackageOptions{ConfigBlob: req.ConfigBlob})
 }
@@ -198,6 +188,8 @@ func packageVolumeToStoreWithOptions(ctx context.Context, localStorePath string,
 	}, nil
 }
 
+// PushPackagedVolume copies a packaged artifact from the local OCI store to a
+// remote registry using the preferred core push contract.
 func PushPackagedVolume(ctx context.Context, localStorePath string, pkg *PackageResult, target RemoteTarget) (*PushResult, error) {
 	if pkg == nil {
 		return nil, validationError("PushPackagedVolume", "package result is required", nil)
@@ -218,86 +210,6 @@ func PushPackagedVolume(ctx context.Context, localStorePath string, pkg *Package
 		return nil, err
 	}
 	return pushLocalTagToRepository(ctx, localStorePath, pkg.LocalTag, repo)
-}
-
-func BuildDataSpec(pkg *PackageResult, push *PushResult, req PackageRequest) (*DataSpec, error) {
-	meta, err := BuildArtifactMetadata(ArtifactMetadataInput{
-		Kind:        "dataset",
-		Name:        defaultString(req.Dataset, req.Tag),
-		Version:     req.Version,
-		StableRef:   defaultString(pkg.StableRef, req.StableRef),
-		DisplayName: req.DisplayName,
-		Description: req.Description,
-		SourceDir:   req.SourceDir,
-		Annotations: req.Annotations,
-	}, pkg, push)
-	if err != nil {
-		return nil, err
-	}
-	return ArtifactMetadataToDataSpec(meta), nil
-}
-
-func ArtifactMetadataToDataSpec(meta *ArtifactMetadata) *DataSpec {
-	if meta == nil {
-		return nil
-	}
-	return &DataSpec{
-		Identity: DataIdentity{
-			StableRef: meta.Identity.StableRef,
-			Dataset:   meta.Identity.Name,
-			Version:   meta.Identity.Version,
-		},
-		Data: DataSection{
-			ArtifactType:   ocispec.MediaTypeImageManifest,
-			Repository:     meta.Location.Repository,
-			Reference:      meta.Location.Reference,
-			ManifestDigest: meta.Location.ManifestDigest,
-			ConfigDigest:   meta.Location.ConfigDigest,
-			TotalSize:      meta.Contents.TotalSize,
-			Partitions:     append([]Partition(nil), meta.Contents.Partitions...),
-		},
-		Display: DataDisplay{
-			Name:        meta.Display.Name,
-			Description: meta.Display.Description,
-			Annotations: cloneAnnotations(meta.Annotations),
-		},
-		Provenance: DataProvenance{
-			PackagedAt: meta.Contents.CreatedAt,
-			SourceDir:  meta.Source.SourceDir,
-			LocalTag:   meta.Location.LocalTag,
-		},
-	}
-}
-
-func PushRemoteDataSpecReferrer(ctx context.Context, push *PushResult, target RemoteTarget, spec *DataSpec) (*ReferrerPushResult, error) {
-	if push == nil {
-		return nil, validationError("PushRemoteDataSpecReferrer", "push result is required", nil)
-	}
-	if spec == nil {
-		return nil, validationError("PushRemoteDataSpecReferrer", "data spec is required", nil)
-	}
-	if strings.TrimSpace(push.Repository) == "" {
-		return nil, validationError("PushRemoteDataSpecReferrer", "push result repository is empty", nil)
-	}
-	if strings.TrimSpace(push.ManifestDigest) == "" {
-		return nil, validationError("PushRemoteDataSpecReferrer", "push result manifest digest is empty", nil)
-	}
-
-	repo, err := newRemoteRepository(push.Repository, target)
-	if err != nil {
-		return nil, err
-	}
-	subjectDesc, err := repo.Resolve(ctx, push.ManifestDigest)
-	if err != nil {
-		return nil, notFoundError("PushRemoteDataSpecReferrer", "resolve subject manifest", err)
-	}
-
-	result, err := pushDataSpecManifest(ctx, repo, subjectDesc, spec)
-	if err != nil {
-		return nil, err
-	}
-	result.Repository = push.Repository
-	return result, nil
 }
 
 func deriveStableRef(req PackageRequest) string {

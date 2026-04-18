@@ -4,16 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/opencontainers/go-digest"
-	"github.com/seoyhaein/sori/catalogutil"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/opencontainers/go-digest"
+	"github.com/seoyhaein/sori/catalogutil"
 )
 
 const registeredDataCatalogJSON = "registered-data.json"
 
+// DisplaySpec is the display-oriented portion of the experimental registration
+// model.
+//
+// Experimental: this type is NodeVault-oriented and is not yet part of the
+// frozen core contract.
 type DisplaySpec struct {
 	Label       string   `json:"label,omitempty"`
 	Description string   `json:"description,omitempty"`
@@ -21,6 +27,11 @@ type DisplaySpec struct {
 	Tags        []string `json:"tags,omitempty"`
 }
 
+// DataRegisterRequest is the current registration input model used by the
+// experimental registration helpers.
+//
+// Experimental: this shape may still change as the NodeVault-facing contract is
+// reviewed.
 type DataRegisterRequest struct {
 	RequestID   string      `json:"request_id,omitempty"`
 	DataName    string      `json:"data_name"`
@@ -34,6 +45,10 @@ type DataRegisterRequest struct {
 	Display     DisplaySpec `json:"display,omitempty"`
 }
 
+// RegisteredDataDefinition is the current persisted view of the experimental
+// registration model.
+//
+// Experimental: this type is not yet part of the frozen core contract.
 type RegisteredDataDefinition struct {
 	CASHash         string      `json:"cas_hash"`
 	DataName        string      `json:"data_name"`
@@ -50,11 +65,19 @@ type RegisteredDataDefinition struct {
 	IntegrityHealth string      `json:"integrity_health"`
 }
 
+// DataRegisterResponse is returned by the experimental registration helpers.
+//
+// Experimental: this type is not yet part of the frozen core contract.
 type DataRegisterResponse struct {
 	CASHash string                    `json:"cas_hash"`
 	Data    *RegisteredDataDefinition `json:"data"`
 }
 
+// DataCatalog is a local JSON-backed catalog for the current experimental
+// registration model.
+//
+// Experimental: this helper remains in the root package for compatibility but
+// is not yet part of the intended long-lived core surface.
 type DataCatalog struct {
 	mu      sync.RWMutex
 	rootDir string
@@ -65,15 +88,28 @@ type registeredDataCatalog struct {
 	Data    []RegisteredDataDefinition `json:"data"`
 }
 
+// NewDataCatalog constructs the local catalog used by the experimental
+// registration helpers.
+//
+// Experimental: this helper is not yet part of the frozen core contract.
 func NewDataCatalog(rootDir string) *DataCatalog {
 	return &DataCatalog{rootDir: rootDir}
 }
 
+// RegisterPackagedData stores a registration record for pkg and push in the
+// current experimental registration catalog.
+//
+// Experimental: prefer the core client path plus BuildArtifactMetadata unless
+// a caller explicitly needs the current registration model.
 func RegisterPackagedData(ctx context.Context, rootDir string, req DataRegisterRequest, pkg *PackageResult, push *PushResult) (*DataRegisterResponse, error) {
 	cat := NewDataCatalog(rootDir)
 	return cat.Register(ctx, req, pkg, push)
 }
 
+// Register stores or updates a registration record in the local experimental
+// catalog.
+//
+// Experimental: this method is not yet part of the frozen core contract.
 func (c *DataCatalog) Register(_ context.Context, req DataRegisterRequest, pkg *PackageResult, push *PushResult) (*DataRegisterResponse, error) {
 	def, err := BuildRegisteredDataDefinition(req, pkg, push)
 	if err != nil {
@@ -112,6 +148,9 @@ func (c *DataCatalog) Register(_ context.Context, req DataRegisterRequest, pkg *
 	return &DataRegisterResponse{CASHash: def.CASHash, Data: def}, nil
 }
 
+// Get returns one entry from the local experimental catalog by CAS hash.
+//
+// Experimental: this method is not yet part of the frozen core contract.
 func (c *DataCatalog) Get(casHash string) (*RegisteredDataDefinition, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -129,6 +168,10 @@ func (c *DataCatalog) Get(casHash string) (*RegisteredDataDefinition, error) {
 	return nil, notFoundError("DataCatalog.Get", fmt.Sprintf("registered data %q not found", casHash), nil)
 }
 
+// List returns entries from the local experimental catalog, optionally filtered
+// by stableRef.
+//
+// Experimental: this method is not yet part of the frozen core contract.
 func (c *DataCatalog) List(stableRef string) ([]RegisteredDataDefinition, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -152,6 +195,11 @@ func (c *DataCatalog) List(stableRef string) ([]RegisteredDataDefinition, error)
 	return out, nil
 }
 
+// BuildRegisteredDataDefinition builds the current experimental registration
+// view from the generic core metadata inputs.
+//
+// Experimental: this adapter remains available for callers that still need the
+// registration model, but it is not yet part of the frozen core contract.
 func BuildRegisteredDataDefinition(req DataRegisterRequest, pkg *PackageResult, push *PushResult) (*RegisteredDataDefinition, error) {
 	meta, err := BuildArtifactMetadata(ArtifactMetadataInput{
 		Kind:        "dataset",
@@ -197,6 +245,10 @@ func BuildRegisteredDataDefinition(req DataRegisterRequest, pkg *PackageResult, 
 	return def, nil
 }
 
+// ArtifactMetadataToRegisteredDataDefinition adapts generic ArtifactMetadata
+// into the current experimental registration shape.
+//
+// Experimental: this adapter is not yet part of the frozen core contract.
 func ArtifactMetadataToRegisteredDataDefinition(meta *ArtifactMetadata, req DataRegisterRequest) *RegisteredDataDefinition {
 	if meta == nil {
 		return nil

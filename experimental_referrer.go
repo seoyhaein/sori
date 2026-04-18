@@ -1,21 +1,16 @@
 package sori
 
-// referrer.go — OCI referrer artifact push (NodeVault spec referrer 연결용).
-//
-// 사용 패턴:
-//
-//	specJSON, _ := sori.MarshalSpec(mySpec)
-//	result, err := sori.PushToolSpecReferrer(ctx, store, imageDigest, specJSON)
-//
-// subject (툴 이미지) digest에 spec JSON을 OCI referrer로 연결한다.
-// Harbor Referrers API (GET /v2/{name}/referrers/{digest})로 조회 가능.
+// experimental_referrer.go contains the NodeVault-oriented referrer helpers.
+// These APIs remain in the root package for compatibility, but they are not
+// yet part of the preferred long-lived core surface.
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/seoyhaein/sori/registryutil"
 	"strings"
+
+	"github.com/seoyhaein/sori/registryutil"
 
 	godigest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -25,47 +20,54 @@ import (
 )
 
 const (
-	// MediaTypeToolSpec is the OCI media type for a NodeVault tool spec referrer.
+	// MediaTypeToolSpec is the current media type used by the experimental tool
+	// referrer helpers.
 	MediaTypeToolSpec = "application/vnd.nodevault.toolspec.v1+json"
 
-	// MediaTypeDataSpec is the OCI media type for a NodeVault data spec referrer.
+	// MediaTypeDataSpec is the current media type used by the experimental data
+	// referrer helpers.
 	MediaTypeDataSpec = "application/vnd.nodevault.dataspec.v1+json"
 )
 
-// ReferrerTarget is an oras-go content store that can accept pushes.
-// Satisfied by *oci.Store (local) and *remote.Repository (Harbor).
+// ReferrerTarget is the target interface accepted by the experimental referrer
+// helpers.
+//
+// Experimental: this target abstraction is tied to the current referrer
+// helpers and is not yet part of the frozen core contract.
 type ReferrerTarget interface {
 	orasoras.Target
 }
 
-// SpecReferrerResult is returned by a successful referrer push.
+// SpecReferrerResult reports the manifest uploaded by the experimental
+// PushToolSpecReferrer and PushDataSpecReferrer helpers.
+//
+// Experimental: this type is not yet part of the frozen core contract.
 type SpecReferrerResult struct {
-	// ReferrerDigest is the digest of the pushed referrer manifest.
 	ReferrerDigest string
-	// SubjectDigest is the subject image digest the referrer is attached to.
-	SubjectDigest string
-	// MediaType is the artifact media type used for the referrer config.
-	MediaType string
+	SubjectDigest  string
+	MediaType      string
 }
 
-// PushToolSpecReferrer attaches specJSON as an OCI referrer artifact linked
-// to subjectDigest in the given target store.
-// mediaType of the config blob is MediaTypeToolSpec.
+// PushToolSpecReferrer uploads a tool-oriented OCI referrer artifact.
 //
-// Both oci.Store (local testing) and remote.Repository (Harbor) satisfy ReferrerTarget.
+// Experimental: this helper is NodeVault-oriented, subject to change, and not
+// yet part of the intended long-lived core surface.
 func PushToolSpecReferrer(ctx context.Context, target ReferrerTarget, subjectDigest string, specJSON []byte) (SpecReferrerResult, error) {
 	return pushSpecReferrer(ctx, target, subjectDigest, specJSON, MediaTypeToolSpec)
 }
 
-// PushDataSpecReferrer attaches specJSON as an OCI referrer artifact linked
-// to subjectDigest in the given target store.
-// mediaType of the config blob is MediaTypeDataSpec.
+// PushDataSpecReferrer uploads a data-oriented OCI referrer artifact.
+//
+// Experimental: this helper is NodeVault-oriented, subject to change, and not
+// yet part of the intended long-lived core surface.
 func PushDataSpecReferrer(ctx context.Context, target ReferrerTarget, subjectDigest string, specJSON []byte) (SpecReferrerResult, error) {
 	return pushSpecReferrer(ctx, target, subjectDigest, specJSON, MediaTypeDataSpec)
 }
 
-// NewReferrerLocalStore opens (or creates) an OCI layout store at the given path.
-// Useful for local testing without a running registry.
+// NewReferrerLocalStore opens an OCI layout store for the experimental
+// referrer helpers.
+//
+// Experimental: this helper is specific to the current referrer API.
 func NewReferrerLocalStore(path string) (ReferrerTarget, error) {
 	store, err := oci.New(path)
 	if err != nil {
@@ -74,9 +76,10 @@ func NewReferrerLocalStore(path string) (ReferrerTarget, error) {
 	return store, nil
 }
 
-// NewReferrerRemoteRepository creates a remote.Repository pointed at repoRef.
-// If plainHTTP is true, HTTP is used instead of HTTPS.
-// credential may be nil for anonymous access.
+// NewReferrerRemoteRepository creates a remote repository for the experimental
+// referrer helpers.
+//
+// Experimental: this helper is specific to the current referrer API.
 func NewReferrerRemoteRepository(repoRef string, plainHTTP bool, credential *auth.Credential) (ReferrerTarget, error) {
 	cfg := registryutil.RemoteConfig{PlainHTTP: plainHTTP}
 	if credential != nil {
@@ -91,7 +94,10 @@ func NewReferrerRemoteRepository(repoRef string, plainHTTP bool, credential *aut
 	return repo, nil
 }
 
-// MarshalSpec marshals v to JSON for use as specJSON in Push* functions.
+// MarshalSpec marshals the payload used by the experimental referrer helpers.
+//
+// Experimental: this helper remains available for the current referrer API but
+// is not yet part of the frozen core contract.
 func MarshalSpec(v interface{}) ([]byte, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -99,8 +105,6 @@ func MarshalSpec(v interface{}) ([]byte, error) {
 	}
 	return data, nil
 }
-
-// ── internal ──────────────────────────────────────────────────────────────────
 
 func pushSpecReferrer(
 	ctx context.Context,
@@ -116,7 +120,6 @@ func pushSpecReferrer(
 		return SpecReferrerResult{}, validationError("pushSpecReferrer", "specJSON must not be empty", nil)
 	}
 
-	// 1. Config blob = specJSON (payload는 config에 담는 ORAS referrer 관례)
 	configDesc := ocispec.Descriptor{
 		MediaType: mediaType,
 		Digest:    godigest.FromBytes(specJSON),
@@ -126,10 +129,6 @@ func pushSpecReferrer(
 		return SpecReferrerResult{}, transportError("pushSpecReferrer", "push config blob", err)
 	}
 
-	// 2. Empty layers — referrer artifact carries payload in config
-	layers := []ocispec.Descriptor{}
-
-	// 3. Build referrer manifest; subject points to the tool image
 	subjectDesc := ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageManifest,
 		Digest:    godigest.Digest(subjectDigest),
@@ -141,7 +140,7 @@ func pushSpecReferrer(
 		orasoras.PackManifestOptions{
 			Subject:          &subjectDesc,
 			ConfigDescriptor: &configDesc,
-			Layers:           layers,
+			Layers:           []ocispec.Descriptor{},
 		},
 	)
 	if err != nil {
@@ -155,8 +154,6 @@ func pushSpecReferrer(
 	}, nil
 }
 
-// pushBlobIfAbsent pushes data to target; "already exists" errors are silently ignored.
-// Target always satisfies content.Pusher via orasoras.Target.
 func pushBlobIfAbsent(ctx context.Context, target ReferrerTarget, desc ocispec.Descriptor, data []byte) error {
 	if err := target.Push(ctx, desc, bytes.NewReader(data)); err != nil {
 		if !isExistError(err) {
@@ -166,7 +163,6 @@ func pushBlobIfAbsent(ctx context.Context, target ReferrerTarget, desc ocispec.D
 	return nil
 }
 
-// isExistError reports whether err indicates a blob already exists in the target.
 func isExistError(err error) bool {
 	if err == nil {
 		return false

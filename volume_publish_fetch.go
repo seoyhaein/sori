@@ -23,6 +23,9 @@ import (
 	"oras.land/oras-go/v2/registry/remote"
 )
 
+// Deprecated: prefer Client.PackageVolume, Client.PackageVolumeWithOptions, or
+// PackageVolumeToStore so new code stays on the preferred client-based core
+// path.
 func (vi *VolumeIndex) PublishVolume(ctx context.Context, volPath, volName string, configBlob []byte) (*VolumeIndex, error) {
 	return NewClient().PublishVolume(ctx, vi, volPath, volName, configBlob)
 }
@@ -147,6 +150,8 @@ func (vi *VolumeIndex) publishVolumeToStore(ctx context.Context, storePath, volP
 	return vi, nil
 }
 
+// Deprecated: prefer Client.PushPackagedVolume or PushPackagedVolume so new
+// code stays on the preferred core push path.
 func PushLocalToRemote(ctx context.Context, localRepoPath, tag, remoteRepo, user, pass string, plainHTTP bool) (*PushResult, error) {
 	repo, err := registryutil.NewRepository(remoteRepo, registryutil.RemoteConfig{
 		PlainHTTP: plainHTTP,
