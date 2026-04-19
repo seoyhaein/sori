@@ -13,6 +13,7 @@ OCI 이미지 형식으로 패키징하는 Go 라이브러리다.
 후속 개선 스프린트는 [docs/post-v1-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/post-v1-sprint-plan.md:1)에 정리되어 있다.
 현재 수준 기준 후속 성숙화 계획은 [docs/maturity-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/maturity-sprint-plan.md:1)에 정리되어 있다.
 stable API 승격 전 검토 항목은 [docs/stable-api-promotion.md](/opt/go/src/github.com/HeaInSeo/sori/docs/stable-api-promotion.md:1)에 정리되어 있다.
+현재 시점 이후 후속 스프린트는 [docs/followup-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/followup-sprint-plan.md:1)에 정리되어 있다.
 registry 통합 테스트 골격은 [docs/registry-integration.md](/opt/go/src/github.com/HeaInSeo/sori/docs/registry-integration.md:1)에 정리되어 있다.
 운영 환경 체크리스트는 [docs/operations.md](/opt/go/src/github.com/HeaInSeo/sori/docs/operations.md:1)에 정리되어 있다.
 stub 파일 처리 방향은 [docs/stub-status.md](/opt/go/src/github.com/HeaInSeo/sori/docs/stub-status.md:1)에 정리되어 있다.
