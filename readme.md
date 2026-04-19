@@ -1,89 +1,419 @@
-### TODO
-- proto 파일과 관련 서비스 파일은 api-proto 로 옮길 예정. 일단 여기서 작업후 옮길 것임.  
-~~- 터미널에서 어떻게 ui 를 잡아서 volume 정보들을 얻어 올까?~~  
-- api-proto 에 트릭이 몇가지 들어갔는데 이거 정리하자. 않하니까 잊어버린다. go work 도 정리 해야함.
+# sori
 
-### 사용해야 할 것.
-- groupcache
-- 구글에서 만든 분산 메모리 캐시 라이브러리  
-- 여러 대의 애플리케이션 인스턴스가 서로 “내가 가진 캐시를 꺼내 쓸래? 아니면 네가 가져가도 돼?” 식으로 조율  
-- “peer” 노드 간에 자동으로 캐시를 share  
+OCI 기반 참조 데이터(볼륨) 패키징 라이브러리.  
+디렉터리를 OCI 아티팩트로 변환하고, 로컬 OCI 스토어와 원격 레지스트리(Harbor 등) 사이의 push/fetch를 담당한다.
 
-```aiignore
-import "github.com/golang/groupcache"
+## 개요
 
-// 전역 그룹 선언
-var volumeGroup = groupcache.NewGroup(
-  "volumes",
-  64<<20, // 캐시 최대 64MB
-  groupcache.GetterFunc(func(ctx groupcache.Context, key string, dest groupcache.Sink) error {
-    // cache miss 시 호출: 키(key)에 해당하는 VolumeManifest를 DB/파일에서 로드
-    manifest, err := loadManifestFromStore(key)
-    if err != nil {
-      return err
-    }
-    data, _ := proto.Marshal(manifest)
-    dest.SetBytes(data)
-    return nil
-  }))
+`sori`는 바이오인포매틱스 파이프라인에서 사용하는 참조 데이터(genome, annotation 등)를  
+OCI 이미지 형식으로 패키징하는 Go 라이브러리다.
 
-// 핸들러 내부에서 사용
-var data []byte
-err := volumeGroup.Get(ctx, volumeRef, groupcache.AllocatingByteSliceSink(&data))
-if err != nil {
-  return nil, err
-}
-var m volresv1.VolumeManifest
-proto.Unmarshal(data, &m)
+범용 라이브러리화 로드맵은 [docs/generalization-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/generalization-sprint-plan.md:1)에 정리되어 있다.
+공개 API 안정도 분류는 [docs/public-api.md](/opt/go/src/github.com/HeaInSeo/sori/docs/public-api.md:1)에 정리되어 있다.
+후속 개선 스프린트는 [docs/post-v1-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/post-v1-sprint-plan.md:1)에 정리되어 있다.
+현재 수준 기준 후속 성숙화 계획은 [docs/maturity-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/maturity-sprint-plan.md:1)에 정리되어 있다.
+stable API 승격 전 검토 항목은 [docs/stable-api-promotion.md](/opt/go/src/github.com/HeaInSeo/sori/docs/stable-api-promotion.md:1)에 정리되어 있다.
+현재 시점 이후 후속 스프린트는 [docs/followup-sprint-plan.md](/opt/go/src/github.com/HeaInSeo/sori/docs/followup-sprint-plan.md:1)에 정리되어 있다.
+registry 통합 테스트 골격은 [docs/registry-integration.md](/opt/go/src/github.com/HeaInSeo/sori/docs/registry-integration.md:1)에 정리되어 있다.
+운영 환경 체크리스트는 [docs/operations.md](/opt/go/src/github.com/HeaInSeo/sori/docs/operations.md:1)에 정리되어 있다.
+stub 파일 처리 방향은 [docs/stub-status.md](/opt/go/src/github.com/HeaInSeo/sori/docs/stub-status.md:1)에 정리되어 있다.
 
+현재 내부 구현은 아래 하위 패키지로 일부 분리되어 있다.
+
+- `archiveutil`: deterministic tar.gz 생성과 안전한 untar
+- `registryutil`: remote repository/TLS/auth/http client 구성
+- `catalogutil`: JSON catalog load/save 공통 유틸
+- `adapters/nodevault`: NodeVault 친화 metadata adapter 초안
+
+주요 기능:
+- 디렉터리를 OCI 레이어(tar.gz)로 변환 — 결정론적(deterministic) 해시 보장
+- 로컬 OCI 스토어(`oras-go` `oci.Store`)에 푸시
+- 원격 레지스트리(Harbor, registry:2 등)로 복사
+- 상위 계층이 바로 쓸 수 있는 package/push 결과 구조 제공
+- 객체 기반 `Client` API 제공
+- 볼륨 컬렉션 인덱스(`volume-collection.json`) 관리
+- 순차/병렬 fetch 지원
+
+## 의존성
+
+| 패키지 | 버전 |
+|--------|------|
+| `oras.land/oras-go/v2` | v2.6.0 |
+| `github.com/opencontainers/image-spec` | v1.1.1 |
+| `github.com/opencontainers/go-digest` | v1.0.0 |
+| `github.com/sirupsen/logrus` | v1.9.3 |
+
+## 빠른 시작
+
+```go
+import "github.com/seoyhaein/sori"
+
+ctx := context.Background()
+
+// 1) 설정 로드
+cfg, err := sori.LoadConfig("sori-oci.json")
+if err != nil { ... }
+if err := cfg.EnsureDir(); err != nil { ... }
+
+// 2) 컬렉션 매니저 초기화
+cm, err := sori.NewCollectionManager(cfg.Local.Path)
+if err != nil { ... }
+
+// 또는 객체 기반 client 생성
+client := cfg.NewClient()
+
+// 3) 볼륨 디렉터리를 OCI로 패키징 + 컬렉션 등록
+if err := cm.PublishVolumeFromDir(ctx, "./my-genome-dir", "HumanRef GRCh38", "grch38.v1.0.0"); err != nil { ... }
+
+// 4) Stable core API: 패키징
+pkg, err := sori.PackageVolumeToStore(ctx, cfg.Local.Path, sori.PackageRequest{
+  SourceDir:   "./my-genome-dir",
+  DisplayName: "HumanRef GRCh38",
+  Tag:         "grch38.v1.0.0",
+  Dataset:     "grch38",
+  Version:     "v1.0.0",
+})
+if err != nil { ... }
+
+// 5) Stable core API: 원격 레지스트리로 푸시
+pushResult, err := sori.PushPackagedVolume(ctx, cfg.Local.Path, pkg, sori.RemoteTarget{
+  Registry:   "harbor.local",
+  Repository: "project/repo",
+  Username:   "user",
+  Password:   "pass",
+  PlainHTTP:  true,
+})
+if err != nil { ... }
+fmt.Println(pushResult.ManifestDigest)
+
+// 6) Stable core API: generic metadata 생성
+meta, err := sori.BuildArtifactMetadata(sori.ArtifactMetadataInput{
+  Kind:        "dataset",
+  Name:        "grch38-reference",
+  Version:     "v1.0.0",
+  DisplayName: "HumanRef GRCh38",
+  Description: "Human reference genome",
+  SourceDir:   "./my-genome-dir",
+}, pkg, pushResult)
+if err != nil { ... }
+fmt.Println(meta.Identity.StableRef)
+
+// 7) Experimental: NodeVault 친화 metadata 초안 생성
+spec, err := sori.BuildDataSpec(pkg, pushResult, sori.PackageRequest{
+  SourceDir:   "./my-genome-dir",
+  DisplayName: "HumanRef GRCh38",
+  Tag:         "grch38.v1.0.0",
+  Dataset:     "grch38",
+  Version:     "v1.0.0",
+})
+if err != nil { ... }
+
+// 8) Experimental: Harbor subject manifest에 dataspec referrer push
+referrerResult, err := sori.PushRemoteDataSpecReferrer(ctx, pushResult, sori.RemoteTarget{
+  Registry:   "harbor.local",
+  Repository: "project/repo",
+  Username:   "user",
+  Password:   "pass",
+  PlainHTTP:  true,
+}, spec)
+if err != nil { ... }
+fmt.Println(referrerResult.ManifestDigest)
+
+// 9) Experimental: NodeVault/Catalog 친화적인 등록 객체 생성 및 저장
+registerResp, err := sori.RegisterPackagedData(ctx, cfg.Local.Path, sori.DataRegisterRequest{
+  DataName:    "grch38-reference",
+  Version:     "v1.0.0",
+  Description: "Human reference genome",
+  Format:      "FASTA",
+  SourceURI:   "s3://example/grch38.fa.gz",
+}, pkg, pushResult)
+if err != nil { ... }
+fmt.Println(registerResp.CASHash)
 ```
 
-### 생각할 것들
+위 예시에서 `4~6` 단계는 stable core 흐름이고, `7~9` 단계는 현재 기준으로 experimental 계층이다.
+새 사용처는 가능하면 `Client` + `BuildArtifactMetadata`까지를 기본 진입 경로로 보는 편이 안전하다.
 
-- 이미지 처리 부분과 맞다아 있음. 같이 고려해야함.  
-- https://github.com/seoyhaein/dockhouse 참고.  
-- tori 와 파일 포멧에 대해서 생각해줘야 함.  
-- 이 프로젝트는 라이브러리다.  팩키지로 개발된거 지워야 함.
+## 설정 파일 (`sori-oci.json`)
 
-### todo
-~~- 볼륨 만들어 주는 메서드와 통합하는 별도의 main.go 만들어서 진행하기 여기서 별도의 메서드 도출해야 함.~~  
-- 생각하기에서 복원 및 백업, 버전 관리 등에 대한 메서드 개발 해야함.
-- 테스트 철저하기 진행하기 어느정도 완료한다음에 codex 활용
-- repo 이름 정하기 이거 config 파일에 넣어서 관리하는 것 생각하고 구현해야 함. 내부적으로 숨길 수 있도록 한다.
-- 파이프라인과 통합하고 코드 최적화 하고 정리해서 마무리 하는 방향으로 집중하자.  
+```json
+{
+  "local": {
+    "type": "oci",
+    "path": "/path/to/writable/oci-store"
+  },
+  "remotes": [
+    {
+      "name": "harbor",
+      "type": "registry",
+      "registry": "harbor.local",
+      "repository": "project/repo",
+      "tls": { "insecure": false, "ca_file": "" },
+      "auth": { "username": "admin", "password": "Harbor12345", "token": "" }
+    }
+  ]
+}
+```
 
-### oras-go
-- https://github.com/oras-project/oras-go/blob/main/docs/tutorial/quickstart.md
+> `/var/lib/sori/oci` (기본값)는 root 권한이 필요하다. 개발/테스트 시에는 `path`를 쓰기 가능한 경로로 설정할 것.
 
-### 생각할것들 (중요, 일단 생각나는데로 해서 정리 안됨)
-~~- 레어버 구분해주는 것을 tui 로 구현하는 것으로 생각했음. 이 내용을 바탕으로 json 만들어주는 방향으로.~~   
-~~- 하위 디렉토리 내용을 선택해서 레이어를 해주는 것을 tui 로 하면 좀더 직관적이고 오류 가능성을 줄여 줄 수 있음.~~  
-~~- 하지만, 조금더 생각을 깊게 해야함.~~    
+## 공개 API
 
-- vsc 같은 경우 docker 에서 이미지들을 가져와서 뿌려주는 방시을 취하고 있다. 마찬자기로, json 파일과 접목해서 가져오되 버전을 가져와서 비교해보고
-- 만약 버전이 같으면 가져오지 않고 json 을 로드 하는 형식으로 하고, 다르면 다른 부분을 가져와서 업데이트 하는 방식을 취한다
+새 코드는 `Stable API`로 분류된 경로를 우선 사용하고, 호환용 wrapper는 신규 사용처에서 피하는 편이 좋다.
 
-- 1번 생각하기
--- TODO 정책을 정해야 하는데 일단, rootDir 안에 볼륨 폴더들이 있는 것이 원칙이다. 하지만 그렇게 하지 않다도 되게 일단 만들어 놓는다.
--- -> 이렇게 할경우 어떻게해 할지 생각해봐야 함., 복사해서 넣어줘야 할까??
+### Config
 
-- 폴더 나 압축 파일이 들어갈 수 있음. 이때 검증과정을 거쳐서 볼륨 작업의 안정성을 높이고, 사용자에게는 간단히 폴더 또는 파일 을 넣어두는 것으로 볼륨을 만들어 주도록 한다.
-- 폴더, 압축 타볼, 파일 이 세가지 경우를 검증하고, no_deep_scan 검증, 파일, 폴더 수를 검증해서 제한을 걸어 놓는 것이 중요할 거 같다.
-- 검증을 통해서, 해당 데이터(폴더, 압축타볼, 파일)등은 내부적으로 정해놓은 폴더에 저장해 넣는다. <- 중복 검증해야 함.
+```go
+func LoadConfig(path string) (*Config, error)
+func InitConfig(path string) (*Config, error)          // deprecated 호환용 로더
+func (conf *Config) EnsureDir() error                  // local.path 디렉터리 생성
+func (conf *Config) NewClient(opts ...ClientOption) *Client
+```
 
-- 2번 생각 하기
-- // TODO 그리고 볼륨 폴더에 는 volume-index.json 이 있어야 한다. 위치는 볼륨 폴더의 루트 위치에 있어야 한다. 그것들을 읽어서 VolumeCollection 을 만들어 주는 방식으로 간다.
-- -> 만약 이렇게 안되어 있으면 에러 뱉어내야 함. 그리고 생성할때 저렇게 배치되도록 해줘야 함.
+### Client
 
+```go
+type Client struct { ... }
+type ClientOption func(*Client)
+type PackageOptions struct { ConfigBlob []byte }
+type PushOptions struct { Target RemoteTarget }
+type FetchOptions struct {
+    Concurrency int
+    RequireEmptyDestination bool
+}
+type ReferrerOptions struct { Target RemoteTarget }
 
-### 버전관리, 복원 및 백업 시나리오
-- 볼륨과 실제 oci store 에 저장되어 있는 것은 같은 것이어야 한다. 이것을 검색하는 키는 결국 volume-collection.json 이고 이게 클라이언트로 갈때는 proto 파일로 전송된다.
-~~- 만약, volume-collection.json 이게 없다면, 먼저 볼륨에 있는지 확인하고, 여기서 가져온다. 이 데이터를 통해서 volume-collection.json 을 만들어 준다.~~
-~~- 만약, volume-collection.json 이 없고, 볼륨이 없다면, oci store 에서 가져와서 volume-collection.json 을 만들어 준다.~~
-- volume-collection.json 을 통해서 볼륨을 만들어주거나, oci store 를 만들어준다. 
-- 만약 volume-collection.json 만 있고, 데이터가 없다면, 이건 실패다.
-- 가장 취약한 데이터는 볼륨과 volume-collection.json 이다. 
-- 복원 할 수 있는 메서드들을 만들어 두어야 한다.
-- race 테스트 해야함. 그리고 lock unlcok 에 대해서 다른 메서드들도 필요한지 생각해야 함.
+func NewClient(opts ...ClientOption) *Client
+func WithLocalStorePath(path string) ClientOption
+func WithHTTPClient(httpClient *http.Client) ClientOption
+func WithClock(now func() time.Time) ClientOption
 
+func (c *Client) LocalStorePath() string
+func (c *Client) PackageVolume(ctx context.Context, req PackageRequest) (*PackageResult, error)
+func (c *Client) PackageVolumeWithOptions(ctx context.Context, req PackageRequest, opts PackageOptions) (*PackageResult, error)
+func (c *Client) PushPackagedVolume(ctx context.Context, pkg *PackageResult, target RemoteTarget) (*PushResult, error)
+func (c *Client) PushPackagedVolumeWithOptions(ctx context.Context, pkg *PackageResult, opts PushOptions) (*PushResult, error)
+func (c *Client) FetchVolume(ctx context.Context, destRoot, repo, tag string, opts FetchOptions) (*VolumeIndex, error)
+func (c *Client) FetchVolumeSequential(ctx context.Context, destRoot, repo, tag string) (*VolumeIndex, error)
+func (c *Client) FetchVolumeParallel(ctx context.Context, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error)
+func (c *Client) PublishVolume(ctx context.Context, vi *VolumeIndex, volPath, volName string, configBlob []byte) (*VolumeIndex, error)
+func (c *Client) PublishVolumeFromDir(ctx context.Context, volDir, displayName, tag string) (*PackageResult, error)
+```
 
+### VolumeIndex / 생성
+
+```go
+func GenerateVolumeIndex(rootPath, displayName string) (*VolumeIndex, error)
+func (vi *VolumeIndex) SaveToFile(rootPath string) error
+func (vi *VolumeIndex) PublishVolume(ctx, volPath, volName string, configBlob []byte) (*VolumeIndex, error)
+```
+
+`PublishVolume`은 각 레이어 descriptor에 `"org.example.partitionPath"` 어노테이션을 설정한다.  
+이 어노테이션이 없으면 `FetchVolSeq` / `FetchVolParallel` 시 오류가 발생하므로 직접 descriptor를 만들 때 반드시 포함해야 한다.
+
+### CollectionManager
+
+```go
+func NewCollectionManager(rootDir string, initial ...VolumeEntry) (*CollectionManager, error)
+func (m *CollectionManager) AddOrUpdate(v VolumeEntry) error
+func (m *CollectionManager) Remove(ref string) (bool, error)
+func (m *CollectionManager) Get(ref string) (VolumeEntry, bool)
+func (m *CollectionManager) GetSnapshot() VolumeCollection
+func (m *CollectionManager) Flush() error
+func (m *CollectionManager) PublishVolumeFromDir(ctx, volDir, displayName, tag string) error
+```
+
+`NewCollectionManager`는 `rootDir`이 없으면 자동으로 생성한다.
+
+### 상위 package / dataspec API
+
+```go
+type PackageRequest struct {
+    SourceDir   string
+    DisplayName string
+    Tag         string
+    Dataset     string
+    Version     string
+    StableRef   string
+    Description string
+    Annotations map[string]string
+    ConfigBlob  []byte
+}
+
+type PackageResult struct {
+    StableRef      string
+    LocalTag       string
+    ManifestDigest string
+    ConfigDigest   string
+    TotalSize      int64
+    CreatedAt      string
+    Partitions     []Partition
+    VolumeIndex    VolumeIndex
+}
+
+type RemoteTarget struct {
+    Registry   string
+    Repository string
+    PlainHTTP  bool
+    InsecureTLS bool
+    Username   string
+    Password   string
+    Token      string
+    CAFile     string
+}
+
+func PackageVolume(ctx context.Context, req PackageRequest) (*PackageResult, error)
+func PackageVolumeToStore(ctx context.Context, localStorePath string, req PackageRequest) (*PackageResult, error)
+func PushPackagedVolume(ctx context.Context, localStorePath string, pkg *PackageResult, target RemoteTarget) (*PushResult, error)
+func BuildDataSpec(pkg *PackageResult, push *PushResult, req PackageRequest) (*DataSpec, error)
+func PushRemoteDataSpecReferrer(ctx context.Context, push *PushResult, target RemoteTarget, spec *DataSpec) (*ReferrerPushResult, error)
+```
+
+이 계층은 `CollectionManager` 없이도 `NodeVault` 같은 상위 서비스가 `package -> push -> metadata 생성` 흐름을 바로 이어붙일 수 있게 하기 위한 API다.
+`PushRemoteDataSpecReferrer`는 원격 subject manifest digest를 기준으로 `application/vnd.nodevault.dataspec.v1+json` referrer manifest를 업로드한다.
+
+### Generic Metadata
+
+```go
+const ArtifactMetadataSchemaVersion = "sori.artifact.v1"
+
+type ArtifactMetadata struct { ... }
+type ArtifactMetadataInput struct { ... }
+
+func BuildArtifactMetadata(input ArtifactMetadataInput, pkg *PackageResult, push *PushResult) (*ArtifactMetadata, error)
+func ArtifactMetadataToDataSpec(meta *ArtifactMetadata) *DataSpec
+func ArtifactMetadataToRegisteredDataDefinition(meta *ArtifactMetadata, req DataRegisterRequest) *RegisteredDataDefinition
+```
+
+`ArtifactMetadata`는 core 계층의 중립 metadata 모델이다. `DataSpec`과 `RegisteredDataDefinition`은 이 모델을 NodeVault 친화 구조로 변환한 adapter 결과다.
+
+### 검증 유틸리티
+
+```go
+func ValidateVolumeDir(volDir string) ([]byte, error)
+// - 빈 디렉터리 → 에러
+// - configblob.json 없으면 빈 JSON으로 생성
+// - configblob.json 있으면 로드해 반환
+```
+
+### 원격 push / fetch
+
+```go
+type PushResult struct {
+    Reference string
+    Repository string
+    Tag string
+    ManifestDigest string
+}
+
+func PushLocalToRemote(ctx, localRepoPath, tag, remoteRepo, user, pass string, plainHTTP bool) (*PushResult, error)
+func FetchVolSeq(ctx, destRoot, repo, tag string) (*VolumeIndex, error)
+func FetchVolParallel(ctx, destRoot, repo, tag string, concurrency int) (*VolumeIndex, error)
+```
+
+`PushLocalToRemote`, `PackageVolume`, `VolumeIndex.PublishVolume` 같은 package-level 함수는 호환용 low-level wrapper다.
+새 코드는 `Client` 기반 API 사용을 권장한다.
+원격 Harbor가 HTTPS와 사설 CA를 사용하는 경우 `RemoteTarget.CAFile`에 PEM 경로를 주면 TLS root CA에 반영된다.
+registry별 차이를 줄이기 위해 `RemoteTarget`은 `HTTPClient`, `Transport`, `AuthProvider`, `ReferrersCapability`도 받을 수 있다.
+`ReferrersCapability`를 지정하지 않으면 oras-go 기본 자동 감지를 사용한다.
+
+### Error 모델
+
+```go
+var (
+    ErrValidation error
+    ErrNotFound   error
+    ErrConflict   error
+    ErrIntegrity  error
+    ErrTransport  error
+    ErrAuth       error
+)
+```
+
+주요 public 함수는 이 에러 종류를 감싼 typed error를 반환한다. 호출자는 `errors.Is(err, sori.ErrValidation)` 같은 식으로 분기할 수 있다.
+
+추가 정책:
+- `PackageOptions.RequireConfigBlob=true`이면 `configblob.json` 자동 생성을 허용하지 않고, 호출자가 config blob을 명시적으로 제공해야 한다.
+- `FetchOptions.RequireEmptyDestination=true`이면 복원 대상 디렉터리가 비어 있지 않을 때 `ErrConflict`를 반환한다.
+
+### 등록 / Catalog API
+
+```go
+type DataRegisterRequest struct {
+    RequestID   string
+    DataName    string
+    Version     string
+    Description string
+    Format      string
+    SourceURI   string
+    Checksum    string
+    StorageURI  string
+    StableRef   string
+    Display     DisplaySpec
+}
+
+type RegisteredDataDefinition struct {
+    CASHash         string
+    DataName        string
+    Version         string
+    Description     string
+    Format          string
+    SourceURI       string
+    Checksum        string
+    StorageURI      string
+    StableRef       string
+    Display         DisplaySpec
+    RegisteredAt    int64
+    LifecyclePhase  string
+    IntegrityHealth string
+}
+
+func BuildRegisteredDataDefinition(req DataRegisterRequest, pkg *PackageResult, push *PushResult) (*RegisteredDataDefinition, error)
+func RegisterPackagedData(ctx context.Context, rootDir string, req DataRegisterRequest, pkg *PackageResult, push *PushResult) (*DataRegisterResponse, error)
+func NewDataCatalog(rootDir string) *DataCatalog
+func (c *DataCatalog) Get(casHash string) (*RegisteredDataDefinition, error)
+func (c *DataCatalog) List(stableRef string) ([]RegisteredDataDefinition, error)
+```
+
+이 계층은 `NodeKit`의 `DataRegisterRequest`와 `Catalog`의 `AdminDataList` 사이를 잇는 최소 로컬 구현이다.
+현재는 `rootDir/registered-data.json`에 저장한다.
+
+## API 안정도
+
+- Stable:
+  `Config.NewClient`, `Client` 기반 package/push/fetch, `BuildArtifactMetadata`, typed error, option 모델
+- Compatibility:
+  `InitConfig`, `PackageVolume`, `PushLocalToRemote`, `VolumeIndex.PublishVolume`
+- Experimental:
+  `DataSpec`, referrer API, registration/catalog API
+
+자세한 목록은 [docs/public-api.md](/opt/go/src/github.com/HeaInSeo/sori/docs/public-api.md:1)를 따른다.
+
+### tar.gz 유틸리티
+
+```go
+func TarGzDir(fsDir, prefixPath string) ([]byte, error)   // 결정론적 tar.gz 생성
+func UntarGzDir(gzipStream io.Reader, dest string) error   // tar.gz 해제
+```
+
+## 테스트 실행
+
+```bash
+# 단위 테스트 (외부 인프라 불필요)
+go test -v -run "TestGenerateAndSaveVolumeIndex|TestTarGzDirDeterministic|TestExtractTarGz|TestMerge|TestLoadOrNewCollection_New|TestManager|TestValidateVolumeDir|TestLoadConfig_TempDir|TestPublishFetchRoundTrip" ./...
+
+# 전체 테스트 (TestPublishVolumeOther, TestOciService01 등은 로컬 OCI 스토어 필요)
+go test -v ./...
+```
+
+root 권한이 없는 환경에서는 `TestLoadConfig` / `TestInitConfig`가 자동으로 skip된다.  
+`TestLoadConfig_TempDir`으로 동일 기능을 검증할 수 있다.
+
+## 알려진 제한 사항
+
+- 과거 stub였던 `local-registry.go`, `pipeline-index.go`, `oci-crud.go`는 제거했고, 판단 배경은 `docs/stub-status.md`에 남겨 두었다.
+- Harbor webhook 연동과 referrer 조회 API는 아직 미구현. 현재는 dataspec referrer push까지만 제공한다.
+
+## 라이선스
+
+Apache License 2.0
